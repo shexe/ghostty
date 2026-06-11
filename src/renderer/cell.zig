@@ -39,6 +39,12 @@ pub const Key = enum {
 /// each frame.
 ///
 /// Must be initialized by resizing before calling any operations.
+///
+/// In addition to `size.rows` viewport rows, the contents always
+/// include two extra rows at indices `size.rows` and `size.rows + 1`:
+/// the rows just below and just above the viewport, respectively.
+/// These are rendered only while a sub-cell (smooth) scroll offset is
+/// active, to fill the gap the offset opens at a viewport edge.
 pub const Contents = struct {
     size: renderer.GridSize = .{ .rows = 0, .columns = 0 },
 
@@ -86,7 +92,9 @@ pub const Contents = struct {
         alloc: Allocator,
         size: renderer.GridSize,
     ) Allocator.Error!void {
-        const row_count: usize = size.rows;
+        // +2 for the extra rows beyond the viewport edges (sub-cell
+        // scrolling), at row indices size.rows and size.rows + 1.
+        const row_count: usize = @as(usize, size.rows) + 2;
 
         // The two extra lists hold cursor cells: index 0 is drawn before the
         // row contents, and index row_count + 1 is drawn after them.
@@ -140,7 +148,7 @@ pub const Contents = struct {
     ) void {
         if (self.size.rows == 0) return;
         self.fg_rows[0].clearRetainingCapacity();
-        self.fg_rows[self.size.rows + 1].clearRetainingCapacity();
+        self.fg_rows[self.size.rows + 3].clearRetainingCapacity();
 
         const cell = v orelse return;
         const style = cursor_style orelse return;
@@ -149,7 +157,7 @@ pub const Contents = struct {
             // Block cursors should be drawn first
             .block => self.fg_rows[0].appendAssumeCapacity(cell),
             // Other cursor styles should be drawn last
-            .block_hollow, .bar, .underline, .lock => self.fg_rows[self.size.rows + 1].appendAssumeCapacity(cell),
+            .block_hollow, .bar, .underline, .lock => self.fg_rows[self.size.rows + 3].appendAssumeCapacity(cell),
         }
     }
 
@@ -159,8 +167,8 @@ pub const Contents = struct {
         if (self.fg_rows[0].items.len > 0) {
             return self.fg_rows[0].items[0];
         }
-        if (self.fg_rows[self.size.rows + 1].items.len > 0) {
-            return self.fg_rows[self.size.rows + 1].items[0];
+        if (self.fg_rows[self.size.rows + 3].items.len > 0) {
+            return self.fg_rows[self.size.rows + 3].items[0];
         }
         return null;
     }
@@ -186,7 +194,8 @@ pub const Contents = struct {
     ) Allocator.Error!void {
         const y = cell.grid_pos[1];
 
-        assert(y < self.size.rows);
+        // +2 for the extra rows beyond the viewport edges.
+        assert(y < self.size.rows + 2);
 
         switch (key) {
             .bg => comptime unreachable,
@@ -204,7 +213,8 @@ pub const Contents = struct {
 
     /// Clear all of the cell contents for a given row.
     pub fn clear(self: *Contents, y: terminal.size.CellCountInt) void {
-        assert(y < self.size.rows);
+        // +2 for the extra rows beyond the viewport edges.
+        assert(y < self.size.rows + 2);
 
         @memset(self.bg_cells[@as(usize, y) * self.size.columns ..][0..self.size.columns], .{ 0, 0, 0, 0 });
 
@@ -406,9 +416,10 @@ test Contents {
     try testing.expectEqual(0, c.fg_rows[0].items.len);
     try testing.expect(c.getCursorGlyph() == null);
 
-    // Add a hollow cursor.
+    // Add a hollow cursor. The cursor-over list is at rows + 3 because
+    // of the two extra rows beyond the viewport edges.
     c.setCursor(cursor_cell, .block_hollow);
-    try testing.expectEqual(cursor_cell, c.fg_rows[rows + 1].items[0]);
+    try testing.expectEqual(cursor_cell, c.fg_rows[rows + 3].items[0]);
     try testing.expectEqual(cursor_cell, c.getCursorGlyph().?);
 }
 

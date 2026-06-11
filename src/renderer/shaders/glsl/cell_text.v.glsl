@@ -49,6 +49,13 @@ void main() {
     // Convert the grid x, y into world space x, y by accounting for cell size
     vec2 cell_pos = cell_size * vec2(grid_pos);
 
+    // The extra row above the viewport (sub-cell scrolling) is stored at
+    // grid row grid_size.y + 1 but renders one row above the grid. The
+    // extra row below (grid_size.y) is already at its natural position.
+    if (grid_pos.y == grid_size.y + 1u) {
+        cell_pos.y = -cell_size.y;
+    }
+
     int vid = gl_VertexID;
 
     // We use a triangle strip with 4 vertices to render quads,
