@@ -191,6 +191,11 @@ pub const Uniforms = extern struct {
     /// scrolling. Positive values shift content down.
     grid_offset_y: f32 align(4),
 
+    /// Which extra rows beyond the viewport edges are rendered:
+    /// bit 0 = the row below the viewport, bit 1 = the second row
+    /// below, bit 2 = the row above.
+    grid_extra_rows: GridExtraRows align(4),
+
     /// The cursor position and color.
     cursor_pos: [2]u16 align(4),
     cursor_color: [4]u8 align(4),
@@ -231,6 +236,13 @@ pub const Uniforms = extern struct {
         up: bool = false,
         down: bool = false,
         _padding: u28 = 0,
+    };
+
+    pub const GridExtraRows = packed struct(u32) {
+        below: bool = false,
+        below2: bool = false,
+        above: bool = false,
+        _padding: u29 = 0,
     };
 };
 

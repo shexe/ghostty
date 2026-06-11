@@ -50,9 +50,10 @@ void main() {
     vec2 cell_pos = cell_size * vec2(grid_pos);
 
     // The extra row above the viewport (sub-cell scrolling) is stored at
-    // grid row grid_size.y + 1 but renders one row above the grid. The
-    // extra row below (grid_size.y) is already at its natural position.
-    if (grid_pos.y == grid_size.y + 1u) {
+    // grid row grid_size.y + 2 but renders one row above the grid. The
+    // extra rows below (grid_size.y and grid_size.y + 1) are already at
+    // their natural positions.
+    if (grid_pos.y == grid_size.y + 2u) {
         cell_pos.y = -cell_size.y;
     }
 
