@@ -1411,6 +1411,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     state.terminal.scrollViewport(.bottom);
                 }
 
+                // Capture the rows just beyond the viewport edges too, for
+                // sub-cell (smooth) scrolling to draw into the gap its
+                // offset opens at an edge.
+                self.terminal_state.overscan_request = .{ .above = 1, .below = 1 };
+
                 // Begin the update of our terminal state. Work that
                 // doesn't require terminal access (e.g. style
                 // denormalization) is deferred to the endUpdate call
@@ -1555,10 +1560,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
                 // Clear the prior highlights
                 const row_data = self.terminal_state.row_data.slice();
+                const range = self.terminal_state.rowDataRange();
                 var any_dirty: bool = false;
                 for (
-                    row_data.items(.highlights),
-                    row_data.items(.dirty),
+                    row_data.items(.highlights)[range.start..range.end],
+                    row_data.items(.dirty)[range.start..range.end],
                 ) |*highlights, *dirty| {
                     if (highlights.items.len > 0) {
                         highlights.clearRetainingCapacity();
@@ -1618,6 +1624,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.draw_mutex.lockUncancelable(global.io());
                 defer self.draw_mutex.unlock(global.io());
 
+                // Update the sub-cell scroll translation of the grid
+                // (smooth scrolling) before rebuilding cells, since the
+                // rebuild uses it to decide whether the extra rows
+                // beyond the viewport edges need to be built.
+                self.uniforms.grid_offset_y = @floatCast(critical.scroll_offset);
+
                 // Build our GPU cells
                 self.rebuildCells(
                     critical.preedit,
@@ -1642,10 +1654,6 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     self.scrollbar = critical.scrollbar;
                     self.scrollbar_dirty = true;
                 }
-
-                // Update the sub-cell scroll translation of the grid
-                // (smooth scrolling).
-                self.uniforms.grid_offset_y = @floatCast(critical.scroll_offset);
 
                 // Update our background color
                 self.uniforms.bg_color = .{
@@ -2649,13 +2657,15 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // working terminal state, even if incorrect.
             errdefer comptime unreachable;
 
-            // Get our row data from our state
+            // Get our row data from our state. Index 0 of these slices is the
+            // top viewport row; the overscan rows sit just outside them.
             const row_data = state.row_data.slice();
-            const row_raws = row_data.items(.raw);
-            const row_cells = row_data.items(.cells);
-            const row_dirty = row_data.items(.dirty);
-            const row_selection = row_data.items(.selection);
-            const row_highlights = row_data.items(.highlights);
+            const vp = state.viewportStart();
+            const row_raws = row_data.items(.raw)[vp..];
+            const row_cells = row_data.items(.cells)[vp..];
+            const row_dirty = row_data.items(.dirty)[vp..];
+            const row_selection = row_data.items(.selection)[vp..];
+            const row_highlights = row_data.items(.highlights)[vp..];
 
             // If our cell contents buffer is shorter than the screen viewport,
             // we render the rows that fit, starting from the bottom. If instead
@@ -2730,6 +2740,59 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 };
             }
 
+            // Rebuild the extra rows beyond the viewport edges. These
+            // fill the gap that a sub-cell (smooth) scroll offset opens
+            // at the top or bottom edge. They're cheap (at most one row
+            // each) so we rebuild them every frame rather than tracking
+            // dirty state. Skipped when our cell buffer doesn't match
+            // the terminal state (a resize is in flight) since the
+            // extra slots may not line up.
+            if (self.cells.size.rows == state.rows) {
+                const offset = self.uniforms.grid_offset_y;
+                const extras: [2]struct {
+                    y: terminal.size.CellCountInt,
+                    /// Index of the overscan row in `row_data`.
+                    i: usize,
+                    wanted: bool,
+                    valid: bool,
+                } = .{
+                    // The row just below the viewport, visible while
+                    // the content is shifted up.
+                    .{
+                        .y = state.rows,
+                        .i = vp + state.rows,
+                        .wanted = offset < 0,
+                        .valid = state.overscan.below >= 1,
+                    },
+                    // The row just above the viewport, visible while
+                    // the content is shifted down.
+                    .{
+                        .y = state.rows + 1,
+                        .i = vp -% 1,
+                        .wanted = offset > 0,
+                        .valid = state.overscan.above >= 1,
+                    },
+                };
+                for (extras) |extra| {
+                    self.cells.clear(extra.y);
+                    if (!extra.wanted or !extra.valid) continue;
+                    self.rebuildRow(
+                        extra.y,
+                        row_data.items(.raw)[extra.i],
+                        &row_data.items(.cells)[extra.i],
+                        // No preedit on the extra rows; the cursor is
+                        // always within the viewport.
+                        null,
+                        row_data.items(.selection)[extra.i],
+                        &row_data.items(.highlights)[extra.i],
+                        links,
+                    ) catch |err| {
+                        log.warn("error building extra row y={} err={}", .{ extra.y, err });
+                        self.cells.clear(extra.y);
+                    };
+                }
+            }
+
             // Setup our cursor rendering information.
             cursor: {
                 // Clear our cursor by default.
@@ -2744,7 +2807,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // need it for styling.
                 const cursor_vp = state.cursor.viewport orelse break :cursor;
                 const cursor_style: terminal.Style = cursor_style: {
-                    const cells = state.row_data.items(.cells);
+                    const cells = state.row_data.items(.cells)[state.viewportStart()..];
                     const cell = cells[cursor_vp.y].get(cursor_vp.x);
                     break :cursor_style if (cell.raw.hasStyling())
                         cell.style
