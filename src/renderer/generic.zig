@@ -748,6 +748,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .padding_extend = .{},
                     .min_contrast = options.config.min_contrast,
                     .grid_offset_y = 0,
+                    .grid_extra_rows = .{},
                     .cursor_pos = .{ std.math.maxInt(u16), std.math.maxInt(u16) },
                     .cursor_color = undefined,
                     .bg_color = .{
@@ -1368,6 +1369,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 scrollbar: terminal.Scrollbar,
                 overlay_features: []const Overlay.Feature,
                 scroll_offset: f64,
+                extra_below_visible: bool,
+                extra_below2_visible: bool,
+                extra_above_visible: bool,
             };
 
             // Update all our data as tightly as possible within the mutex.
@@ -1414,7 +1418,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Capture the rows just beyond the viewport edges too, for
                 // sub-cell (smooth) scrolling to draw into the gap its
                 // offset opens at an edge.
-                self.terminal_state.overscan_request = .{ .above = 1, .below = 1 };
+                self.terminal_state.overscan_request = .{ .above = 1, .below = 2 };
 
                 // Begin the update of our terminal state. Work that
                 // doesn't require terminal access (e.g. style
@@ -1527,6 +1531,17 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 const scroll_offset = state.scrollOffset();
                 state.mouse.applied_scroll_y = scroll_offset;
 
+                // Whether the extra rows beyond the viewport edges may be
+                // shown at all. The below row renders into the blank slack
+                // at the bottom of the window even at a zero offset (so
+                // the next line is always peeking, like any smooth
+                // scrolling UI), so this is gated by mode rather than by
+                // the offset: applications handling their own mouse and
+                // the alternate screen don't show scrollback continuity.
+                const extras_visible = state.terminal.flags.mouse_event == .none and
+                    state.terminal.screens.active_key != .alternate;
+                const overscan = self.terminal_state.overscan;
+
                 break :critical .{
                     .links = links,
                     .mouse = state.mouse,
@@ -1534,6 +1549,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .scrollbar = scrollbar,
                     .overlay_features = overlay_features,
                     .scroll_offset = scroll_offset,
+                    .extra_below_visible = extras_visible and overscan.below >= 1,
+                    .extra_below2_visible = extras_visible and overscan.below >= 2,
+                    .extra_above_visible = extras_visible and overscan.above >= 1,
                 };
             };
 
@@ -1625,10 +1643,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 defer self.draw_mutex.unlock(global.io());
 
                 // Update the sub-cell scroll translation of the grid
-                // (smooth scrolling) before rebuilding cells, since the
-                // rebuild uses it to decide whether the extra rows
-                // beyond the viewport edges need to be built.
+                // (smooth scrolling) and the extra-row visibility before
+                // rebuilding cells, since the rebuild uses them to decide
+                // whether the extra rows beyond the viewport edges need
+                // to be built.
                 self.uniforms.grid_offset_y = @floatCast(critical.scroll_offset);
+                self.uniforms.grid_extra_rows = .{
+                    .below = critical.extra_below_visible,
+                    .below2 = critical.extra_below2_visible,
+                    .above = critical.extra_above_visible,
+                };
 
                 // Build our GPU cells
                 self.rebuildCells(
@@ -2740,42 +2764,43 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 };
             }
 
-            // Rebuild the extra rows beyond the viewport edges. These
-            // fill the gap that a sub-cell (smooth) scroll offset opens
-            // at the top or bottom edge. They're cheap (at most one row
-            // each) so we rebuild them every frame rather than tracking
-            // dirty state. Skipped when our cell buffer doesn't match
-            // the terminal state (a resize is in flight) since the
-            // extra slots may not line up.
+            // Rebuild the extra rows beyond the viewport edges. The row
+            // below the viewport fills both the sub-cell scroll gap and
+            // the blank slack at the bottom of the window (the window
+            // height remainder that doesn't fit a whole cell), so the
+            // next line is always partially visible there. The row above
+            // only shows while the grid is shifted down (there is no
+            // slack at the top). They're cheap (at most one row each) so
+            // we rebuild them every frame rather than tracking dirty
+            // state. Skipped when our cell buffer doesn't match the
+            // terminal state (a resize is in flight) since the extra
+            // slots may not line up.
             if (self.cells.size.rows == state.rows) {
-                const offset = self.uniforms.grid_offset_y;
-                const extras: [2]struct {
+                const extras: [3]struct {
                     y: terminal.size.CellCountInt,
                     /// Index of the overscan row in `row_data`.
                     i: usize,
                     wanted: bool,
-                    valid: bool,
                 } = .{
-                    // The row just below the viewport, visible while
-                    // the content is shifted up.
                     .{
                         .y = state.rows,
                         .i = vp + state.rows,
-                        .wanted = offset < 0,
-                        .valid = state.overscan.below >= 1,
+                        .wanted = self.uniforms.grid_extra_rows.below,
                     },
-                    // The row just above the viewport, visible while
-                    // the content is shifted down.
                     .{
                         .y = state.rows + 1,
+                        .i = vp + state.rows + 1,
+                        .wanted = self.uniforms.grid_extra_rows.below2,
+                    },
+                    .{
+                        .y = state.rows + 2,
                         .i = vp -% 1,
-                        .wanted = offset > 0,
-                        .valid = state.overscan.above >= 1,
+                        .wanted = self.uniforms.grid_extra_rows.above,
                     },
                 };
                 for (extras) |extra| {
                     self.cells.clear(extra.y);
-                    if (!extra.wanted or !extra.valid) continue;
+                    if (!extra.wanted) continue;
                     self.rebuildRow(
                         extra.y,
                         row_data.items(.raw)[extra.i],

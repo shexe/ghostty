@@ -9,6 +9,12 @@ enum Padding : uint8_t {
   EXTEND_DOWN = 8u,
 };
 
+enum ExtraRows : uint8_t {
+  EXTRA_BELOW = 1u,
+  EXTRA_BELOW2 = 2u,
+  EXTRA_ABOVE = 4u,
+};
+
 struct Uniforms {
   float4x4 projection_matrix;
   float2 screen_size;
@@ -18,6 +24,7 @@ struct Uniforms {
   uint8_t padding_extend;
   float min_contrast;
   float grid_offset_y;
+  uint8_t grid_extra_rows;
   ushort2 cursor_pos;
   uchar4 cursor_color;
   uchar4 bg_color;
@@ -478,21 +485,23 @@ fragment float4 cell_bg_fragment(
   }
 
   // Clamp y position if we should extend, otherwise discard if out of
-  // bounds. While a sub-cell scroll offset is active, the row just
-  // beyond the edge in the scrolled direction is valid: the row above
-  // the viewport is stored at grid row grid_size.y + 1 and the row
-  // below at grid_size.y.
+  // bounds. The extra rows beyond the viewport edges are valid when
+  // rendered: the two rows below the viewport are stored at grid rows
+  // grid_size.y and grid_size.y + 1 (natural positions) and the row
+  // above at grid_size.y + 2.
   if (grid_pos.y < 0) {
-    if (grid_pos.y == -1 && uniforms.grid_offset_y > 0.0f) {
-      grid_pos.y = uniforms.grid_size.y + 1;
+    if (grid_pos.y == -1 && (uniforms.grid_extra_rows & EXTRA_ABOVE)) {
+      grid_pos.y = uniforms.grid_size.y + 2;
     } else if (uniforms.padding_extend & EXTEND_UP) {
       grid_pos.y = 0;
     } else {
       return bg;
     }
   } else if (grid_pos.y > uniforms.grid_size.y - 1) {
-    if (grid_pos.y == uniforms.grid_size.y && uniforms.grid_offset_y < 0.0f) {
+    if (grid_pos.y == uniforms.grid_size.y && (uniforms.grid_extra_rows & EXTRA_BELOW)) {
       // The row below the viewport; stored at its natural index.
+    } else if (grid_pos.y == uniforms.grid_size.y + 1 && (uniforms.grid_extra_rows & EXTRA_BELOW2)) {
+      // The second row below the viewport; stored at its natural index.
     } else if (uniforms.padding_extend & EXTEND_DOWN) {
       grid_pos.y = uniforms.grid_size.y - 1;
     } else {
@@ -576,9 +585,10 @@ vertex CellTextVertexOut cell_text_vertex(
   float2 cell_pos = uniforms.cell_size * float2(in.grid_pos);
 
   // The extra row above the viewport (sub-cell scrolling) is stored at
-  // grid row grid_size.y + 1 but renders one row above the grid. The
-  // extra row below (grid_size.y) is already at its natural position.
-  if (in.grid_pos.y == uniforms.grid_size.y + 1) {
+  // grid row grid_size.y + 2 but renders one row above the grid. The
+  // extra rows below (grid_size.y and grid_size.y + 1) are already at
+  // their natural positions.
+  if (in.grid_pos.y == uniforms.grid_size.y + 2) {
     cell_pos.y = -uniforms.cell_size.y;
   }
 
