@@ -1070,10 +1070,24 @@ extension Ghostty {
                 // TODO(mitchellh): do we have to scale the x/y here by window scale factor?
             }
 
+            // If the scroll gesture ended without any momentum following
+            // (fingers lifted from a slow drag), the core never sees a
+            // momentum phase, so report the gesture end as a momentum end.
+            // The core uses this to snap smooth (sub-cell) scrolling to a
+            // whole line once scrolling settles.
+            var momentum: Ghostty.Input.Momentum = .init(event.momentumPhase)
+            if momentum == .none {
+                switch event.phase {
+                case .ended: momentum = .ended
+                case .cancelled: momentum = .cancelled
+                default: break
+                }
+            }
+
             let scrollEvent = Ghostty.Input.MouseScrollEvent(
                 x: x,
                 y: y,
-                mods: .init(precision: precision, momentum: .init(event.momentumPhase))
+                mods: .init(precision: precision, momentum: momentum)
             )
             surfaceModel.sendMouseScroll(scrollEvent)
         }
