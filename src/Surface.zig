@@ -4038,6 +4038,17 @@ pub fn mouseButtonCallback(
         } else |err| {
             log.warn("error processing prompt click err={}", .{err});
         }
+
+        // Fallback for Option/Alt-click: move the cursor to the click
+        // by synthesizing arrow keys. This works in applications with
+        // no shell integration (e.g. TUI inputs).
+        if (mods.alt) {
+            if (self.maybeAltClickMoveCursor()) |handled| {
+                if (handled) return true;
+            } else |err| {
+                log.warn("error processing alt click err={}", .{err});
+            }
+        }
     }
 
     // Report mouse events if enabled
@@ -4399,6 +4410,63 @@ fn maybePromptClick(self: *Surface) !bool {
             }
         },
     }
+
+    return true;
+}
+
+/// Handle an Option/Alt click that moves the terminal cursor to the
+/// clicked cell by synthesizing arrow key presses (iTerm2-style
+/// "option-click to move cursor"). Unlike maybePromptClick, this works
+/// without shell integration so it can be used in TUI inputs (e.g.
+/// Claude Code's prompt) — at the cost of being a blind best-effort:
+/// the terminal can't know how the application interprets arrow keys.
+///
+/// The caller must hold the renderer state mutex.
+fn maybeAltClickMoveCursor(self: *Surface) !bool {
+    const t: *terminal.Terminal = self.renderer_state.terminal;
+    const screen: *terminal.Screen = t.screens.active;
+
+    // Respect the same config option as prompt clicking.
+    if (!self.config.cursor_click_to_move) return false;
+
+    // If the application is handling the mouse itself, let it.
+    if (self.isMouseReporting()) return false;
+
+    // A selection means this was a drag (e.g. rectangle selection,
+    // which also uses Alt on macOS), not a click.
+    if (screen.selection != null) return false;
+
+    // Get the clicked cell in active-area coordinates. Clicks in the
+    // scrollback (above the active area) can't be reached with arrow
+    // keys, so we do nothing there.
+    const pos = try self.rt_surface.getCursorPos();
+    const pos_vp = self.posToViewport(pos.x, pos.y);
+    const click_pin: terminal.Pin = screen.pages.pin(.{ .viewport = .{
+        .x = pos_vp.x,
+        .y = pos_vp.y,
+    } }) orelse return false;
+    const click: terminal.point.Coordinate = (screen.pages.pointFromPin(
+        .active,
+        click_pin,
+    ) orelse return false).coord();
+
+    const dy: isize = @as(isize, @intCast(click.y)) - @as(isize, @intCast(screen.cursor.y));
+    const dx: isize = @as(isize, @intCast(click.x)) - @as(isize, @intCast(screen.cursor.x));
+    if (dx == 0 and dy == 0) return true;
+
+    // Synthesize arrow key presses: vertical first, then horizontal.
+    const app_keys = t.modes.get(.cursor_keys);
+    const v_seq = if (dy > 0)
+        (if (app_keys) "\x1bOB" else "\x1b[B") // down
+    else
+        (if (app_keys) "\x1bOA" else "\x1b[A"); // up
+    const h_seq = if (dx > 0)
+        (if (app_keys) "\x1bOC" else "\x1b[C") // right
+    else
+        (if (app_keys) "\x1bOD" else "\x1b[D"); // left
+
+    for (0..@abs(dy)) |_| self.queueIo(.{ .write_stable = v_seq }, .locked);
+    for (0..@abs(dx)) |_| self.queueIo(.{ .write_stable = h_seq }, .locked);
 
     return true;
 }
