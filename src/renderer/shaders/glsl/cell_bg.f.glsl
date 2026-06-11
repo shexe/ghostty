@@ -35,21 +35,23 @@ vec4 cell_bg() {
     }
 
     // Clamp y position if we should extend, otherwise discard if out of
-    // bounds. While a sub-cell scroll offset is active, the row just
-    // beyond the edge in the scrolled direction is valid: the row above
-    // the viewport is stored at grid row grid_size.y + 1 and the row
-    // below at grid_size.y.
+    // bounds. The extra rows beyond the viewport edges are valid when
+    // rendered: the two rows below the viewport are stored at grid rows
+    // grid_size.y and grid_size.y + 1 (natural positions) and the row
+    // above at grid_size.y + 2.
     if (grid_pos.y < 0) {
-        if (grid_pos.y == -1 && grid_offset_y > 0.0) {
-            grid_pos.y = int(grid_size.y) + 1;
+        if (grid_pos.y == -1 && (grid_extra_rows & EXTRA_ABOVE) != 0) {
+            grid_pos.y = int(grid_size.y) + 2;
         } else if ((padding_extend & EXTEND_UP) != 0) {
             grid_pos.y = 0;
         } else {
             return bg;
         }
     } else if (grid_pos.y > grid_size.y - 1) {
-        if (grid_pos.y == int(grid_size.y) && grid_offset_y < 0.0) {
+        if (grid_pos.y == int(grid_size.y) && (grid_extra_rows & EXTRA_BELOW) != 0) {
             // The row below the viewport; stored at its natural index.
+        } else if (grid_pos.y == int(grid_size.y) + 1 && (grid_extra_rows & EXTRA_BELOW2) != 0) {
+            // The second row below the viewport; stored at its natural index.
         } else if ((padding_extend & EXTEND_DOWN) != 0) {
             grid_pos.y = int(grid_size.y) - 1;
         } else {

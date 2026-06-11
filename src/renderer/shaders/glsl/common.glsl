@@ -20,6 +20,7 @@ layout(binding = 1, std140) uniform Globals {
     uniform uint padding_extend;
     uniform float min_contrast;
     uniform float grid_offset_y;
+    uniform uint grid_extra_rows;
     uniform uint cursor_pos_packed_2u16;
     uniform uint cursor_color_packed_4u8;
     uniform uint bg_color_packed_4u8;
@@ -37,6 +38,11 @@ const uint EXTEND_LEFT = 1u;
 const uint EXTEND_RIGHT = 2u;
 const uint EXTEND_UP = 4u;
 const uint EXTEND_DOWN = 8u;
+
+// Extra rows beyond the viewport edges (sub-cell scrolling)
+const uint EXTRA_BELOW = 1u;
+const uint EXTRA_BELOW2 = 2u;
+const uint EXTRA_ABOVE = 4u;
 
 //----------------------------------------------------------------------------//
 // Functions for Unpacking Values
