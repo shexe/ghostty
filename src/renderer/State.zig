@@ -114,7 +114,50 @@ pub const Mouse = struct {
     /// This could really just be mods in general and we probably will
     /// move it out of mouse state at some point.
     mods: inputpkg.Mods = .{},
+
+    /// The sub-cell scroll remainder in pixels (mirror of
+    /// Surface.Mouse.pending_scroll_y). The renderer uses this to
+    /// translate the grid for smooth (pixel) scrolling. Positive
+    /// values shift content down (revealing older rows above).
+    pending_scroll_y: f64 = 0,
+
+    /// The gated offset (see scrollOffset) the renderer most recently
+    /// applied to the grid. Written by the renderer each frame; read
+    /// by mouse hit-testing so clicks land on the visually shifted
+    /// rows. This is a plain cached value, safe to read without
+    /// traversing terminal state.
+    applied_scroll_y: f64 = 0,
 };
+
+/// The effective sub-cell scroll offset in pixels that the renderer
+/// should apply to the grid this frame. This gates the raw pending
+/// scroll remainder so that it's zero whenever sub-cell scrolling
+/// must not be shown: mouse-reporting apps, the alternate screen
+/// (no scrollback), or when the viewport is at the edge of the
+/// scrollback in the scrolled direction.
+///
+/// The mutex must be held when calling this.
+pub fn scrollOffset(self: *const State) f64 {
+    const pending = self.mouse.pending_scroll_y;
+    if (pending == 0) return 0;
+
+    // Applications receiving mouse events handle scrolling themselves.
+    if (self.terminal.flags.mouse_event != .none) return 0;
+
+    // The alternate screen has no scrollback to smoothly reveal.
+    if (self.terminal.screens.active_key == .alternate) return 0;
+
+    const pages = &self.terminal.screens.active.pages;
+    const top_left = pages.getTopLeft(.viewport);
+
+    // Scrolling up but there is no row above the viewport.
+    if (pending > 0 and top_left.up(1) == null) return 0;
+
+    // Scrolling down but the viewport is already at the bottom.
+    if (pending < 0 and pages.pinIsActive(top_left)) return 0;
+
+    return pending;
+}
 
 /// The pre-edit state. See Surface.preeditCallback for more information.
 pub const Preedit = struct {

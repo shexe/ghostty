@@ -747,6 +747,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .screen_size = undefined,
                     .padding_extend = .{},
                     .min_contrast = options.config.min_contrast,
+                    .grid_offset_y = 0,
                     .cursor_pos = .{ std.math.maxInt(u16), std.math.maxInt(u16) },
                     .cursor_color = undefined,
                     .bg_color = .{
@@ -1366,6 +1367,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 preedit: ?renderer.State.Preedit,
                 scrollbar: terminal.Scrollbar,
                 overlay_features: []const Overlay.Feature,
+                scroll_offset: f64,
             };
 
             // Update all our data as tightly as possible within the mutex.
@@ -1514,12 +1516,19 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     ) catch &.{};
                 };
 
+                // Sub-cell scroll offset for smooth scrolling. We write the
+                // gated value back so mouse hit-testing can account for the
+                // offset that's actually rendered.
+                const scroll_offset = state.scrollOffset();
+                state.mouse.applied_scroll_y = scroll_offset;
+
                 break :critical .{
                     .links = links,
                     .mouse = state.mouse,
                     .preedit = preedit,
                     .scrollbar = scrollbar,
                     .overlay_features = overlay_features,
+                    .scroll_offset = scroll_offset,
                 };
             };
 
@@ -1633,6 +1642,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     self.scrollbar = critical.scrollbar;
                     self.scrollbar_dirty = true;
                 }
+
+                // Update the sub-cell scroll translation of the grid
+                // (smooth scrolling).
+                self.uniforms.grid_offset_y = @floatCast(critical.scroll_offset);
 
                 // Update our background color
                 self.uniforms.bg_color = .{

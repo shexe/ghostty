@@ -2935,6 +2935,11 @@ pub fn keyCallback(
 
         if (self.config.scroll_to_bottom.keystroke) self.io.terminal.scrollViewport(.bottom);
 
+        // Typing resets any sub-cell scroll offset so the prompt row
+        // isn't rendered partially clipped at the viewport edge.
+        self.mouse.pending_scroll_y = 0;
+        self.renderer_state.mouse.pending_scroll_y = 0;
+
         try self.queueRender();
     }
 
@@ -3556,7 +3561,7 @@ pub fn scrollCallback(
     // Always show the mouse again if it is hidden
     if (self.mouse.hidden) self.showMouse();
 
-    const y: ScrollAmount = if (yoff == 0) .{} else y: {
+    var y: ScrollAmount = if (yoff == 0) .{} else y: {
         // We use cell_size to determine if we have accumulated enough to trigger a scroll
         const cell_size: f64 = @floatFromInt(self.size.cell.height);
 
@@ -3601,13 +3606,14 @@ pub fn scrollCallback(
             break :y .{};
         }
 
-        // We scroll by the number of rows in the offset and save the remainder
-        const amount = poff / cell_size;
+        // We scroll by the number of whole rows in the offset (rounded
+        // towards zero) and save the sub-cell remainder. The remainder
+        // is rendered as a pixel offset of the grid for smooth scrolling.
+        const amount: f64 = @trunc(poff / cell_size);
         assert(@abs(amount) >= 1);
         self.mouse.pending_scroll_y = poff - (amount * cell_size);
 
-        // Round towards zero.
-        const delta: isize = @intFromFloat(@trunc(amount));
+        const delta: isize = @intFromFloat(amount);
         assert(@abs(delta) >= 1);
 
         break :y .{ .delta = delta };
@@ -3627,19 +3633,39 @@ pub fn scrollCallback(
             break :x .{};
         }
 
-        const amount = poff / cell_size;
+        const amount: f64 = @trunc(poff / cell_size);
         assert(@abs(amount) >= 1);
         self.mouse.pending_scroll_x = poff - (amount * cell_size);
-        const delta: isize = @intFromFloat(@trunc(amount));
+        const delta: isize = @intFromFloat(amount);
         assert(@abs(delta) >= 1);
         break :x .{ .delta = delta };
     };
+
+    // If the scroll gesture settled (fingers lifted without momentum, or
+    // momentum finished), snap to a whole line so the viewport doesn't
+    // rest at a sub-cell offset: round to the nearest line.
+    if (scroll_mods.momentum == .ended or scroll_mods.momentum == .cancelled) {
+        const pending = self.mouse.pending_scroll_y;
+        if (pending != 0) {
+            const cell_size: f64 = @floatFromInt(self.size.cell.height);
+            self.mouse.pending_scroll_y = 0;
+            if (@abs(pending) >= cell_size / 2) {
+                y.delta += if (pending > 0) 1 else -1;
+            }
+        }
+    }
 
     // log.info("SCROLL: delta_y={} delta_x={}", .{ y.delta, x.delta });
 
     {
         self.renderer_state.mutex.lockUncancelable(global.io());
         defer self.renderer_state.mutex.unlock(global.io());
+
+        // Mirror the sub-cell remainder for the renderer so it can
+        // translate the grid for smooth scrolling. The renderer gates
+        // this to zero where sub-cell offsets must not show (alternate
+        // screen, mouse reporting, scrollback edges).
+        self.renderer_state.mouse.pending_scroll_y = self.mouse.pending_scroll_y;
 
         // If we have an active mouse reporting mode, clear the selection.
         // The selection can occur if the user uses the shift mod key to
@@ -4832,8 +4858,13 @@ pub fn colorSchemeCallback(self: *Surface, scheme: apprt.ColorScheme) !void {
 }
 
 pub fn posToViewport(self: Surface, xpos: f64, ypos: f64) terminal.point.Coordinate {
+    // If the renderer is currently translating the grid by a sub-cell
+    // scroll offset, mouse hit-testing must subtract that offset so
+    // clicks and selections land on the visually correct row.
+    const ypos_adjusted = ypos - self.renderer_state.mouse.applied_scroll_y;
+
     // Get our grid cell
-    const coord: rendererpkg.Coordinate = .{ .surface = .{ .x = xpos, .y = ypos } };
+    const coord: rendererpkg.Coordinate = .{ .surface = .{ .x = xpos, .y = ypos_adjusted } };
     const grid = coord.convert(.grid, self.size).grid;
     return .{ .x = grid.x, .y = grid.y };
 }
@@ -4881,6 +4912,26 @@ fn showMouse(self: *Surface) void {
 /// will ever return false. We can expand this in the future if it becomes
 /// useful. We did previous/next tab so we could implement #498.
 pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool {
+    // Actions that move the viewport in whole lines reset any sub-cell
+    // scroll remainder so the grid doesn't rest at a sub-cell offset.
+    switch (action) {
+        .scroll_to_top,
+        .scroll_to_bottom,
+        .scroll_page_up,
+        .scroll_page_down,
+        .scroll_page_fractional,
+        .scroll_page_lines,
+        .jump_to_prompt,
+        => {
+            self.mouse.pending_scroll_y = 0;
+            self.renderer_state.mutex.lockUncancelable(global.io());
+            defer self.renderer_state.mutex.unlock(global.io());
+            self.renderer_state.mouse.pending_scroll_y = 0;
+        },
+
+        else => {},
+    }
+
     // Forward app-scoped actions to the app. Some app-scoped actions are
     // special-cased here because they do some special things when performed
     // from the surface.
