@@ -3561,7 +3561,7 @@ pub fn scrollCallback(
     // Always show the mouse again if it is hidden
     if (self.mouse.hidden) self.showMouse();
 
-    var y: ScrollAmount = if (yoff == 0) .{} else y: {
+    const y: ScrollAmount = if (yoff == 0) .{} else y: {
         // We use cell_size to determine if we have accumulated enough to trigger a scroll
         const cell_size: f64 = @floatFromInt(self.size.cell.height);
 
@@ -3641,19 +3641,11 @@ pub fn scrollCallback(
         break :x .{ .delta = delta };
     };
 
-    // If the scroll gesture settled (fingers lifted without momentum, or
-    // momentum finished), snap to a whole line so the viewport doesn't
-    // rest at a sub-cell offset: round to the nearest line.
-    if (scroll_mods.momentum == .ended or scroll_mods.momentum == .cancelled) {
-        const pending = self.mouse.pending_scroll_y;
-        if (pending != 0) {
-            const cell_size: f64 = @floatFromInt(self.size.cell.height);
-            self.mouse.pending_scroll_y = 0;
-            if (@abs(pending) >= cell_size / 2) {
-                y.delta += if (pending > 0) 1 else -1;
-            }
-        }
-    }
+    // NOTE(pixel-scroll): we deliberately do NOT snap to a whole line
+    // when the gesture settles — the viewport is allowed to rest at a
+    // sub-cell offset. The offset still resets on typing and keybinding
+    // scrolls, and is gated off at scrollback edges, mouse-reporting
+    // apps, and the alternate screen.
 
     // log.info("SCROLL: delta_y={} delta_x={}", .{ y.delta, x.delta });
 
