@@ -477,15 +477,23 @@ fragment float4 cell_bg_fragment(
     }
   }
 
-  // Clamp y position if we should extend, otherwise discard if out of bounds.
+  // Clamp y position if we should extend, otherwise discard if out of
+  // bounds. While a sub-cell scroll offset is active, the row just
+  // beyond the edge in the scrolled direction is valid: the row above
+  // the viewport is stored at grid row grid_size.y + 1 and the row
+  // below at grid_size.y.
   if (grid_pos.y < 0) {
-    if (uniforms.padding_extend & EXTEND_UP) {
+    if (grid_pos.y == -1 && uniforms.grid_offset_y > 0.0f) {
+      grid_pos.y = uniforms.grid_size.y + 1;
+    } else if (uniforms.padding_extend & EXTEND_UP) {
       grid_pos.y = 0;
     } else {
       return bg;
     }
   } else if (grid_pos.y > uniforms.grid_size.y - 1) {
-    if (uniforms.padding_extend & EXTEND_DOWN) {
+    if (grid_pos.y == uniforms.grid_size.y && uniforms.grid_offset_y < 0.0f) {
+      // The row below the viewport; stored at its natural index.
+    } else if (uniforms.padding_extend & EXTEND_DOWN) {
       grid_pos.y = uniforms.grid_size.y - 1;
     } else {
       return bg;
@@ -566,6 +574,13 @@ vertex CellTextVertexOut cell_text_vertex(
 ) {
   // Convert the grid x, y into world space x, y by accounting for cell size
   float2 cell_pos = uniforms.cell_size * float2(in.grid_pos);
+
+  // The extra row above the viewport (sub-cell scrolling) is stored at
+  // grid row grid_size.y + 1 but renders one row above the grid. The
+  // extra row below (grid_size.y) is already at its natural position.
+  if (in.grid_pos.y == uniforms.grid_size.y + 1) {
+    cell_pos.y = -uniforms.cell_size.y;
+  }
 
   // We use a triangle strip with 4 vertices to render quads,
   // so we determine which corner of the cell this vertex is in
