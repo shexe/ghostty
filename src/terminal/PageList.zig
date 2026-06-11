@@ -5742,7 +5742,7 @@ pub fn nodeIsValid(
 
 /// Returns the viewport for the given pin, preferring to pin to
 /// "active" if the pin is within the active area.
-fn pinIsActive(self: *const PageList, p: Pin) bool {
+pub fn pinIsActive(self: *const PageList, p: Pin) bool {
     // If the pin is in the active page, then we can quickly determine
     // if we're beyond the end.
     const active = self.getTopLeft(.active);

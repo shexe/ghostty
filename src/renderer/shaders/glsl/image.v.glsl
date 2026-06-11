@@ -43,5 +43,8 @@ void main() {
     vec2 image_pos = (cell_size * grid_pos) + cell_offset;
     image_pos += dest_size * corner;
 
+    // Apply the sub-cell scroll translation (smooth scrolling).
+    image_pos.y += grid_offset_y;
+
     gl_Position = projection_matrix * vec4(image_pos.xy, 1.0, 1.0);
 }
