@@ -1,0 +1,6 @@
+#!/bin/sh
+# Build shim: Apple's Xcode 26.5 libtool drops Zig-built archive members that
+# aren't 8-byte aligned, causing spurious "undefined symbol" link failures.
+# Delegate to LLVM's libtool instead. Keep tools/bin first in PATH when building.
+# Remove this shim once a future Xcode fixes the alignment handling.
+exec /opt/homebrew/opt/llvm@20/bin/llvm-libtool-darwin "$@"
