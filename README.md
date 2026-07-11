@@ -8,14 +8,15 @@ comes to rest between rows wherever you stop, with no snap back to a row
 boundary.
 
 It also adds **Option-click to move the cursor** in the prompt, with no shell
-integration required.
+integration required, and makes **⌘-click open URLs that are hard-wrapped
+across lines** by programs such as tmux and Claude Code.
 
 Built on Ghostty **v1.3.1**. This is an unofficial personal fork and is not
 affiliated with the Ghostty project.
 
 > **The fork lives on the [`pixel-scroll`](../../tree/pixel-scroll) branch.**
 > The [**full diff against v1.3.1**](../../compare/v1.3.1...pixel-scroll) shows
-> everything it changes, about 640 lines across 15 files.
+> everything it changes, about 900 lines across 16 files.
 
 ## What it does
 
@@ -31,6 +32,10 @@ affiliated with the Ghostty project.
   in Claude Code), and the top and bottom of the scrollback, are unaffected.
 - Option-click positions the cursor in the prompt, with no shell integration
   required.
+- ⌘-click opens URLs that span hard-wrapped lines. Programs that wrap their
+  own output (tmux, TUIs like Claude Code) emit a real newline mid-URL, which
+  stock Ghostty treats as the end of the line. Link matching joins neighboring
+  full-width rows, so the whole URL highlights and opens.
 
 ## How it works
 
