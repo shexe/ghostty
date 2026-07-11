@@ -197,6 +197,58 @@ test "renderCellMap" {
     try testing.expect(!result.contains(.{ .x = 1, .y = 2 }));
 }
 
+test "renderCellMap matches across hard-wrapped rows" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t: terminal.Terminal = try .init(testing.io, alloc, .{
+        .cols = 5,
+        .rows = 3,
+    });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+
+    // Simulate a program hard-wrapping a long line: the first row is
+    // full to the right edge but the newline is explicit (no wrap
+    // flag), and the continuation row is indented.
+    const str = "123AB\r\n  CD6";
+    s.nextSlice(str);
+
+    var state: terminal.RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    var set = try Set.fromConfig(alloc, &.{
+        .{
+            .regex = "ABCD",
+            .action = .{ .open = {} },
+            .highlight = .{ .always = {} },
+        },
+    });
+    defer set.deinit(alloc);
+
+    var result: terminal.RenderState.CellSet = .empty;
+    defer result.deinit(alloc);
+    try set.renderCellMap(
+        alloc,
+        &result,
+        &state,
+        null,
+        .{},
+    );
+
+    // The match spans the hard-wrap break: "AB" at the end of row 0
+    // and "CD" after the indent on row 1.
+    try testing.expect(result.contains(.{ .x = 3, .y = 0 }));
+    try testing.expect(result.contains(.{ .x = 4, .y = 0 }));
+    try testing.expect(result.contains(.{ .x = 2, .y = 1 }));
+    try testing.expect(result.contains(.{ .x = 3, .y = 1 }));
+    try testing.expect(!result.contains(.{ .x = 0, .y = 1 }));
+    try testing.expect(!result.contains(.{ .x = 4, .y = 1 }));
+}
+
 test "renderCellMap hover links" {
     const testing = std.testing;
     const alloc = testing.allocator;

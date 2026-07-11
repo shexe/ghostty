@@ -1194,6 +1194,11 @@ pub const RenderState = struct {
     /// string written to the given writer. This will unwrap all the wrapped
     /// rows. This is useful for a minimal viewport search.
     ///
+    /// Rows that look hard-wrapped by a program rather than the terminal
+    /// (text reaching the right edge without the wrap flag) are also
+    /// joined with the following row, heuristically, so that link
+    /// regexes can match URLs split by tmux/TUI-side wrapping.
+    ///
     /// This currently writes empty cell contents as \x00 and writes all
     /// blank lines. This is fine for our current usage (link search) but
     /// we can adjust this later.
@@ -1218,6 +1223,7 @@ pub const RenderState = struct {
         const row_rows = row_slice.items(.raw)[vp_start..][0..self.rows];
         const row_cells = row_slice.items(.cells)[vp_start..][0..self.rows];
 
+        var skip_leading_blanks = false;
         for (
             0..,
             row_rows,
@@ -1229,6 +1235,15 @@ pub const RenderState = struct {
                 cells_slice.items(.raw),
                 cells_slice.items(.grapheme),
             ) |x, cell, graphemes| {
+                // If the previous row looked hard-wrapped (see below),
+                // skip the continuation row's leading blanks so a URL
+                // split across the break becomes contiguous.
+                if (skip_leading_blanks) {
+                    const cp = cell.codepoint();
+                    if (cp == 0 or cp == ' ') continue;
+                    skip_leading_blanks = false;
+                }
+
                 var len: usize = std.unicode.utf8CodepointSequenceLength(cell.codepoint()) catch
                     return error.WriteFailed;
                 try writer.print("{u}", .{cell.codepoint()});
@@ -1247,6 +1262,28 @@ pub const RenderState = struct {
             }
 
             if (!row.wrap) {
+                // Heuristic for lines hard-wrapped by a program rather
+                // than the terminal (tmux, TUIs): a row with text
+                // reaching (within one column of) the right edge likely
+                // continues on the next row, so omit the newline to let
+                // link regexes match across the break.
+                const looks_hard_wrapped = full: {
+                    const raws = cells_slice.items(.raw);
+                    var rx: usize = raws.len;
+                    while (rx > 0) {
+                        rx -= 1;
+                        const cp = raws[rx].codepoint();
+                        if (cp == 0 or cp == ' ') continue;
+                        break :full rx + 2 >= raws.len;
+                    }
+                    break :full false;
+                };
+                if (looks_hard_wrapped) {
+                    skip_leading_blanks = true;
+                    continue;
+                }
+
+                skip_leading_blanks = false;
                 try writer.writeAll("\n");
                 if (map) |m| try m.map.append(m.alloc, .{
                     .x = @intCast(cells_slice.len),
@@ -2445,6 +2482,44 @@ test "string" {
     defer alloc.free(result);
 
     const expected = "AB\x00\x00\x00\n\x00\x00\x00\x00\x00\n";
+    try testing.expectEqualStrings(expected, result);
+}
+
+test "string joins hard-wrapped rows" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(testing.io, alloc, .{
+        .cols = 5,
+        .rows = 3,
+    });
+    defer t.deinit(alloc);
+
+    var s = t.vtStream();
+    defer s.deinit();
+
+    // Simulate a program hard-wrapping a long line: the first row is
+    // full to the right edge but the newline is explicit, so the wrap
+    // flag is not set. The continuation row is indented.
+    s.nextSlice("ABCDE\r\n  FG");
+
+    var state: RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    var w = std.Io.Writer.Allocating.init(alloc);
+    defer w.deinit();
+
+    try state.string(&w.writer, null);
+
+    const result = try w.toOwnedSlice();
+    defer alloc.free(result);
+
+    // The full first row joins with the second, dropping the newline
+    // and the continuation indent. The second row ends within the
+    // one-column edge tolerance so it too joins the (blank) third row,
+    // whose blanks are skipped; the trailing newline remains.
+    const expected = "ABCDEFG\x00\n";
     try testing.expectEqualStrings(expected, result);
 }
 
