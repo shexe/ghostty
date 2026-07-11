@@ -1650,10 +1650,13 @@ fn mouseRefreshLinks(
         const link = (try self.linkAtPos(pos)) orelse break :link .{ null, false };
         switch (link.action) {
             .open => {
-                const str = try self.io.terminal.screens.active.selectionString(alloc, .{
+                const raw = try self.io.terminal.screens.active.selectionString(alloc, .{
                     .sel = link.selection,
                     .trim = false,
                 });
+                // The selection may span hard-wrapped lines (see
+                // linkAtPin) so remove the line breaks and indentation.
+                const str = try stripHardWrapBreaks(alloc, raw);
                 break :link .{
                     .{ .url = str },
                     self.config.link_previews == .true,
@@ -4526,11 +4529,52 @@ fn linkAtPin(
         .semantic_prompt_boundary = true,
     }) orelse return null;
 
+    // Extend the line across hard-wrapped breaks: when a program does
+    // its own wrapping (tmux, TUIs) it emits a real newline at the
+    // terminal width, splitting long URLs across rows the terminal
+    // sees as unrelated lines. If a neighboring physical row has text
+    // reaching the right edge, treat it as a continuation of the same
+    // logical line for link matching. See rowLooksHardWrapped.
+    var search_sel: terminal.Selection = line;
+    var joined_lines: usize = 0;
+    while (joined_lines < link_hard_wrap_max_join) : (joined_lines += 1) {
+        const above = search_sel.start().up(1) orelse break;
+        if (!rowLooksHardWrapped(above)) break;
+        const above_line = screen.selectLine(.{
+            .pin = above,
+            .whitespace = null,
+            .semantic_prompt_boundary = true,
+        }) orelse break;
+        search_sel = terminal.Selection.init(above_line.start(), search_sel.end(), false);
+    }
+    var joined_down: usize = 0;
+    while (joined_down < link_hard_wrap_max_join) : (joined_down += 1) {
+        if (!rowLooksHardWrapped(search_sel.end())) break;
+        const below = search_sel.end().down(1) orelse break;
+        const below_line = screen.selectLine(.{
+            .pin = below,
+            .whitespace = null,
+            .semantic_prompt_boundary = true,
+        }) orelse break;
+        search_sel = terminal.Selection.init(search_sel.start(), below_line.end(), false);
+    }
+    joined_lines += joined_down;
+
     const strmap = try screen.selectionStringMap(self.alloc, .{
-        .sel = line,
+        .sel = search_sel,
         .trim = false,
     });
     defer strmap.deinit(self.alloc);
+
+    // If we joined hard-wrapped lines, remove the line breaks (and any
+    // continuation-line indentation) from the search string so link
+    // regexes can match across them.
+    const joined_map: ?terminal.StringMap = if (joined_lines > 0)
+        try joinHardWrappedMap(self.alloc, strmap)
+    else
+        null;
+    defer if (joined_map) |m| m.deinit(self.alloc);
+    const search_map = joined_map orelse strmap;
 
     for (self.config.links) |link| {
         // Skip highlight/mods check when mouse_mods is null (double-click mode)
@@ -4539,7 +4583,7 @@ fn linkAtPin(
             .always_mods, .hover_mods => |v| if (!v.equal(mods)) continue,
         };
 
-        var it = strmap.searchIterator(link.regex);
+        var it = search_map.searchIterator(link.regex);
         while (true) {
             var match = (try it.next()) orelse break;
             defer match.deinit();
@@ -4553,6 +4597,88 @@ fn linkAtPin(
     }
 
     return null;
+}
+
+/// Max number of extra hard-wrapped physical lines to join in each
+/// direction when detecting links.
+const link_hard_wrap_max_join = 3;
+
+/// Heuristic for detecting lines hard-wrapped by a program rather than
+/// the terminal: returns true if the physical row at the given pin has
+/// text reaching (within one column of) the right edge. Programs that
+/// do their own wrapping (tmux, TUIs like Claude Code) emit a real
+/// newline at the width they render at, so a row full of text likely
+/// continues on the next row even though the terminal didn't wrap it.
+/// Soft-wrapped rows return false; the terminal already knows those
+/// continue and selectLine handles them.
+fn rowLooksHardWrapped(pin: terminal.Pin) bool {
+    const rac = pin.rowAndCell();
+    if (rac.row.wrap) return false;
+    const cells = pin.cells(.all);
+    var x: usize = cells.len;
+    while (x > 0) {
+        x -= 1;
+        const cell = &cells[x];
+        if (!cell.hasText()) continue;
+        if (cell.codepoint() == ' ') continue;
+        return x + 2 >= cells.len;
+    }
+    return false;
+}
+
+/// Builds a copy of the string map with hard-wrap artifacts removed:
+/// every newline is dropped along with the run of spaces immediately
+/// following it (continuation-line indentation), so a URL split across
+/// hard-wrapped lines becomes contiguous. Byte i of the string maps to
+/// pin map[i], so both are filtered in lockstep and match selections
+/// still point at the real cells.
+fn joinHardWrappedMap(
+    alloc: Allocator,
+    orig: terminal.StringMap,
+) Allocator.Error!terminal.StringMap {
+    var str: std.ArrayList(u8) = .empty;
+    defer str.deinit(alloc);
+    try str.ensureTotalCapacity(alloc, orig.string.len);
+    var map: @FieldType(terminal.StringMap, "map") = .empty;
+    errdefer map.deinit(alloc);
+
+    var i: usize = 0;
+    while (i < orig.string.len) : (i += 1) {
+        if (orig.string[i] == '\n') {
+            while (i + 1 < orig.string.len and orig.string[i + 1] == ' ') i += 1;
+            continue;
+        }
+        str.appendAssumeCapacity(orig.string[i]);
+        try map.append(alloc, orig.map.get(i).?, 1);
+    }
+
+    return .{
+        .string = try str.toOwnedSliceSentinel(alloc, 0),
+        .map = map,
+    };
+}
+
+/// Removes hard-wrap artifacts (newlines and the indentation
+/// immediately following them) from link text extracted from a
+/// selection that spans hard-wrapped lines. See linkAtPin.
+fn stripHardWrapBreaks(
+    alloc: Allocator,
+    str: []const u8,
+) Allocator.Error![:0]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(alloc);
+    try out.ensureTotalCapacity(alloc, str.len);
+
+    var i: usize = 0;
+    while (i < str.len) : (i += 1) {
+        if (str[i] == '\n') {
+            while (i + 1 < str.len and str[i + 1] == ' ') i += 1;
+            continue;
+        }
+        out.appendAssumeCapacity(str[i]);
+    }
+
+    return try out.toOwnedSliceSentinel(alloc, 0);
 }
 
 /// This returns the mouse mods to consider for link highlighting or
@@ -4582,10 +4708,15 @@ fn processLinks(self: *Surface, pos: apprt.CursorPos) !bool {
     const link = try self.linkAtPos(pos) orelse return false;
     switch (link.action) {
         .open => {
-            const str = try self.io.terminal.screens.active.selectionString(self.alloc, .{
+            const raw = try self.io.terminal.screens.active.selectionString(self.alloc, .{
                 .sel = link.selection,
                 .trim = false,
             });
+            defer self.alloc.free(raw);
+
+            // The selection may span hard-wrapped lines (see linkAtPin)
+            // so remove the line breaks and continuation indentation.
+            const str = try stripHardWrapBreaks(self.alloc, raw);
             defer self.alloc.free(str);
 
             const resolved_path = try self.resolvePathForOpening(str);
@@ -5249,10 +5380,19 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
                 const url_text = switch (link_info.action) {
                     .open => url_text: {
                         // For regex links, get the text from selection
-                        break :url_text (self.io.terminal.screens.active.selectionString(self.alloc, .{
+                        const raw = (self.io.terminal.screens.active.selectionString(self.alloc, .{
                             .sel = link_info.selection,
                             .trim = self.config.clipboard_trim_trailing_spaces,
                         })) catch |err| {
+                            log.err("error reading url string err={}", .{err});
+                            return false;
+                        };
+                        defer self.alloc.free(raw);
+
+                        // The selection may span hard-wrapped lines (see
+                        // linkAtPin) so remove the line breaks and
+                        // continuation indentation.
+                        break :url_text stripHardWrapBreaks(self.alloc, raw) catch |err| {
                             log.err("error reading url string err={}", .{err});
                             return false;
                         };
