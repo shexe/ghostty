@@ -13,8 +13,8 @@ git fetch origin --tags
 git rebase vX.Y.Z pixel-scroll      # the new release tag
 ```
 
-Then rebuild (see "Build" below). If the rebase conflicts, the patch touches
-these areas — re-apply the intent rather than the exact lines:
+Then rebuild (see "Build" below). If the rebase conflicts, re-apply the intent
+rather than the exact lines. The patch touches these areas:
 
 | File | What the patch does there |
 |---|---|
@@ -30,21 +30,21 @@ these areas — re-apply the intent rather than the exact lines:
 | `macos/.../SurfaceView_AppKit.swift` | `scrollWheel`: report gesture phase end as momentum end when no momentum follows (currently unused by core — snap was removed — but kept for future use). |
 
 Upstream tracking: the feature request is
-https://github.com/ghostty-org/ghostty/discussions/3206 — if upstream lands
+https://github.com/ghostty-org/ghostty/discussions/3206. If upstream lands
 native smooth scrolling, drop this patch entirely.
 
 ## Build
 
-Requirements discovered the hard way (June 2026, Xcode 26.5 / macOS 26):
+Build requirements as of June 2026 (Xcode 26.5, macOS 26):
 
 - **Zig**: exactly the `minimum_zig_version` from `build.zig.zon` (0.15.2 for
-  v1.3.1), and it must be **Homebrew's** `zig@0.15` — the ziglang.org tarball
-  cannot link against Xcode ≥26.4 SDKs (arm64 missing from libSystem.tbd
-  umbrella; ghostty-org/ghostty#11991). Fixed upstream in Zig 0.16.
+  v1.3.1), and it must be **Homebrew's** `zig@0.15`. The ziglang.org tarball
+  cannot link against Xcode ≥26.4 SDKs (arm64 missing from the libSystem.tbd
+  umbrella, ghostty-org/ghostty#11991). Fixed upstream in Zig 0.16.
 - **libtool**: Apple's Xcode 26.5 libtool drops Zig-built archive members that
   aren't 8-byte aligned (causes "undefined symbol" walls for sentry, libintl,
   …). `tools/bin/libtool` shims to `llvm-libtool-darwin` from `brew`'s
-  `llvm@20`; keep it first in PATH. If a future Xcode fixes this, the shim can
+  `llvm@20`. Keep it first in PATH. If a future Xcode fixes this, the shim can
   go.
 - **Metal Toolchain**: `xcodebuild -downloadComponent MetalToolchain` (one-time).
 - Full Xcode 26+ selected (`xcode-select -p`), not just CLT.
@@ -66,7 +66,7 @@ rm -rf ~/Applications/"Ghostty Smooth.app" && \
 
 - `-Dsentry=false`: no crash reporting needed in a personal fork (and sentry
   was one of the libtool-mangled archives).
-- `-Dxcframework-target=native`: arm64-only; the x86_64 half of the universal
+- `-Dxcframework-target=native`: arm64-only. The x86_64 half of the universal
   build hits the same libtool problem and isn't needed locally.
 - Debug builds land in `macos/build/Debug/`, ReleaseFast in
   `macos/build/ReleaseLocal/`.
