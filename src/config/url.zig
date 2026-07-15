@@ -52,6 +52,12 @@ const no_trailing_colon =
     \\(?<!:)
 ;
 
+// A path's final "." is sentence punctuation, unless one or more spaces
+// then the end of the line follow it.
+const no_trailing_period =
+    \\(?:(?<!\.)|(?= +$))
+;
+
 const dotted_path_lookahead =
     \\(?=[\w\-.~:\/?#@!$&*+;=%]*\.)
 ;
@@ -93,7 +99,8 @@ const rooted_or_relative_path_branch =
     path_chars ++ "+" ++
     any_path_space_segments ++
     no_trailing_colon ++
-    ")";
+    ")" ++
+    no_trailing_period;
 
 // Branch 3: Bare relative paths such as src/config/url.zig.
 const bare_relative_path_prefix =
@@ -104,14 +111,30 @@ const bare_relative_path_branch =
     dotted_path_lookahead ++
     bare_relative_path_prefix ++
     path_chars ++ "+" ++
-    no_trailing_colon;
+    no_trailing_colon ++
+    no_trailing_period;
+
+// Branch 4: Bare relative directory paths such as notes/wrapups/. No dot is
+// required: the trailing slash is itself the path evidence, which keeps
+// prose like "input/output" unmatched (it has no trailing slash). The final
+// negative lookahead pins the match to a slash at the end of the path text,
+// so "input/output" cannot half-match as "input/". A following "." is
+// allowed (and excluded from the match): a path ending in "/" cannot own a
+// dot, so it must be sentence punctuation. Dotted paths like foo/.bar are
+// claimed by branch 3 first.
+const bare_relative_dir_branch =
+    bare_relative_path_prefix ++
+    \\(?:[\w\-.~:?#@!$&*+;=%]+\/)*(?![\w\-~:\/?#@!$&*+;=%])
+;
 
 pub const regex =
     scheme_url_branch ++
     "|" ++
     rooted_or_relative_path_branch ++
     "|" ++
-    bare_relative_path_branch;
+    bare_relative_path_branch ++
+    "|" ++
+    bare_relative_dir_branch;
 
 test "url regex" {
     const testing = std.testing;
@@ -474,6 +497,50 @@ test "url regex" {
             .input = "./Downloads: Operation not permitted",
             .expect = "./Downloads",
         },
+        // sentence-ending period should not be part of the path
+        .{
+            .input = "/Users/me/notes.md. More text follows.",
+            .expect = "/Users/me/notes.md",
+        },
+        .{
+            .input = "see ~/foo/bar.txt.",
+            .expect = "~/foo/bar.txt",
+        },
+        .{
+            .input = "read src/config/url.zig.",
+            .expect = "src/config/url.zig",
+        },
+        .{
+            .input = "../example.py. and more",
+            .expect = "../example.py",
+        },
+        .{
+            .input = "wrote /tmp/report.md..",
+            .expect = "/tmp/report.md",
+        },
+        // dotless bare relative directory paths: trailing slash is the evidence
+        .{
+            .input = "generation/vignettes/v2/builder/reference/ why isn't this opening",
+            .expect = "generation/vignettes/v2/builder/reference/",
+        },
+        .{
+            .input = "open notes/ now",
+            .expect = "notes/",
+        },
+        .{
+            .input = "cd runs/ab-master-01/",
+            .expect = "runs/ab-master-01/",
+        },
+        // sentence period after a dir path is punctuation, not path
+        .{
+            .input = "see notes/wrapups/. More text.",
+            .expect = "notes/wrapups/",
+        },
+        // trailing comma stops the match cleanly
+        .{
+            .input = "check notes/wrapups/, then commit",
+            .expect = "notes/wrapups/",
+        },
     };
 
     for (cases) |case| {
@@ -506,6 +573,10 @@ test "url regex" {
         // double-slash comments are not paths
         "// foo bar",
         "//foo",
+        // no half-match of prose as "word/" (dir branch needs a trailing slash)
+        "and/or",
+        "50/50 chance",
+        "input/output pairs",
     };
     for (no_match_cases) |input| {
         var result = re.search(input, .{});
