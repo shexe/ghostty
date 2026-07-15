@@ -4,8 +4,9 @@ This fork is a short series of commits on the `pixel-scroll` branch, applied on
 top of the `v1.3.1` tag: smooth sub-cell scrolling, Option-click cursor movement
 (`src/Surface.zig` only: `maybeAltClickMoveCursor` + its hook in
 `mouseButtonCallback`), no snap-on-settle, edge-row rendering (partial lines
-at both viewport edges while resting between lines), and hard-wrapped link
-matching (⌘-click opens URLs split across rows by tmux/TUI-side wrapping).
+at both viewport edges while resting between lines), hard-wrapped link
+matching (⌘-click opens URLs split across rows by tmux/TUI-side wrapping),
+and dotless relative directory links (⌘-click on paths like `notes/wrapups/`).
 
 ## Steps
 
@@ -29,6 +30,7 @@ rather than the exact lines. The patch touches these areas:
 | `src/renderer/link.zig` | Test coverage only: `renderCellMap` matching across hard-wrapped rows. |
 | `src/renderer/cell.zig` | `Contents` allocates 3 internal slack rows; cursor layers at `size.rows + 4`; `add`/`clear` accept `y < size.rows + 3`. |
 | `src/renderer/Overlay.zig` | Inspector overlay loops bounded to `state.rows`. |
+| `src/config/url.zig` | `bare_relative_dir_branch`: match dotless bare relative paths whose last character is `/` (upstream's bare-relative branch requires a dot in the path). Final negative lookahead stops prose half-matching as `word/`; a trailing sentence period stays out of the match. Tests in the same file (`notes/wrapups/` cases; no-match: `and/or`, `50/50`, `input/output`). |
 | `macos/.../SurfaceView_AppKit.swift` | `scrollWheel`: report gesture phase end as momentum end when no momentum follows (currently unused by core — snap was removed — but kept for future use). |
 
 Upstream tracking: the feature request is
