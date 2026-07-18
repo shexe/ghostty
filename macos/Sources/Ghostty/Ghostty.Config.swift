@@ -460,6 +460,22 @@ extension Ghostty {
             return v
         }
 
+        var composeMinLines: UInt32 {
+            guard let config = self.config else { return 2 }
+            var v: CUnsignedInt = 2
+            let key = "compose-min-lines"
+            _ = ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8)))
+            return max(1, v)
+        }
+
+        var composeThumbnailSize: UInt32 {
+            guard let config = self.config else { return 72 }
+            var v: CUnsignedInt = 72
+            let key = "compose-thumbnail-size"
+            _ = ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8)))
+            return max(24, v)
+        }
+
         var composeFontFamily: String? {
             guard let config = self.config else { return nil }
             var v: UnsafePointer<Int8>?
