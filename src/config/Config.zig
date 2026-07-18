@@ -1554,6 +1554,14 @@ title: ?[:0]const u8 = null,
 /// the compose box uses the system font. macOS only. (Fork addition.)
 @"compose-font-family": ?[:0]const u8 = null,
 
+/// The initial height of the compose box text area, in lines of text.
+/// The box still grows as you type. macOS only. (Fork addition.)
+@"compose-min-lines": u32 = 2,
+
+/// The size in points of image attachment thumbnails in the compose box.
+/// macOS only. (Fork addition.)
+@"compose-thumbnail-size": u32 = 72,
+
 /// The setting that will change the application class value.
 ///
 /// This controls the class field of the `WM_CLASS` X11 property (when running
