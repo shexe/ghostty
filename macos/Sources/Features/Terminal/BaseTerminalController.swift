@@ -682,8 +682,12 @@ class BaseTerminalController: NSWindowController,
         guard let surfaceView = notification.object as? Ghostty.SurfaceView else { return }
         guard surfaceTree.contains(surfaceView) else { return }
         guard !composeBoxIsShowing else { return }
+        let draft = ComposeDraftStore.shared.draft(for: surfaceView)
         if let seed = notification.userInfo?[Notification.Name.ghosttyComposeSeedKey] as? String {
-            ComposeDraftStore.shared.draft(for: surfaceView).text += seed
+            draft.text += seed
+        }
+        if let image = notification.userInfo?[Notification.Name.ghosttyComposeSeedImageKey] as? NSImage {
+            draft.images.append(image)
         }
         composeBoxIsShowing = true
     }
