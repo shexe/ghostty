@@ -278,15 +278,64 @@ private class ComposeNSTextView: NSTextView {
     var onSend: ((Bool) -> Void)?
     var onDismiss: (() -> Void)?
 
+    /// The modifier combo (on Enter) that inserts without submitting, from
+    /// the compose-insert-key config option. Default: Cmd+Shift+Enter.
+    private static func insertKeyModifiers() -> NSEvent.ModifierFlags {
+        let fallback: NSEvent.ModifierFlags = [.command, .shift]
+        guard let spec = (NSApp.delegate as? AppDelegate)?.ghostty.config.composeInsertKey else {
+            return fallback
+        }
+
+        var mods: NSEvent.ModifierFlags = []
+        var sawEnter = false
+        for token in spec.lowercased().split(separator: "+") {
+            switch token {
+            case "cmd", "command", "super": mods.insert(.command)
+            case "shift": mods.insert(.shift)
+            case "opt", "option", "alt": mods.insert(.option)
+            case "ctrl", "control": mods.insert(.control)
+            case "enter", "return": sawEnter = true
+            default: return fallback
+            }
+        }
+
+        // Require enter plus at least one modifier; a bare "enter" combo
+        // would swallow the newline key.
+        guard sawEnter, !mods.isEmpty else { return fallback }
+        return mods
+    }
+
+    /// Handles Enter-key combos: the configured insert combo deposits
+    /// without submitting; Cmd+Enter sends and submits. Returns false for
+    /// events that aren't a recognized combo (plain Enter stays a newline).
+    private func handleEnterCombo(_ event: NSEvent, mods: NSEvent.ModifierFlags) -> Bool {
+        guard event.keyCode == 0x24 else { return false }
+
+        if mods == Self.insertKeyModifiers(), !mods.isEmpty {
+            onSend?(false)
+            return true
+        }
+        if mods.contains(.command) {
+            onSend?(true)
+            return true
+        }
+        return false
+    }
+
+    override func keyDown(with event: NSEvent) {
+        // Non-command insert combos (e.g. opt+enter) arrive here rather
+        // than through the key-equivalent path.
+        let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        if handleEnterCombo(event, mods: mods) { return }
+        super.keyDown(with: event)
+    }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         // Only compare against real modifier keys; keys like backspace can
         // carry incidental flags (e.g. .function) that break exact matches.
         let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
 
-        // Return key with Command held: send. Shift additionally held means
-        // deposit the text without submitting.
-        if event.keyCode == 0x24 && mods.contains(.command) {
-            onSend?(!mods.contains(.shift))
+        if handleEnterCombo(event, mods: mods) {
             return true
         }
 
