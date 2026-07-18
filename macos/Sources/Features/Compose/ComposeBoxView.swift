@@ -142,10 +142,16 @@ struct TerminalComposeBoxView: View {
         return width > 0 ? width : nil
     }
 
-    /// Minimum height fits about three lines, like claude.ai's composer.
+    /// Minimum height in lines from compose-min-lines; the box grows as
+    /// content needs it.
     private var minTextHeight: CGFloat {
+        let lines = CGFloat((NSApp.delegate as? AppDelegate)?.ghostty.config.composeMinLines ?? 2)
         let lineHeight = NSLayoutManager().defaultLineHeight(for: font)
-        return lineHeight * 3 + ComposeBoxMetrics.textInset.height * 2
+        return lineHeight * lines + ComposeBoxMetrics.textInset.height * 2
+    }
+
+    private var thumbnailSize: CGFloat {
+        CGFloat((NSApp.delegate as? AppDelegate)?.ghostty.config.composeThumbnailSize ?? 72)
     }
 
     var body: some View {
@@ -164,7 +170,7 @@ struct TerminalComposeBoxView: View {
                                         Image(nsImage: attachments[i])
                                             .resizable()
                                             .aspectRatio(contentMode: .fill)
-                                            .frame(width: 72, height: 72)
+                                            .frame(width: thumbnailSize, height: thumbnailSize)
                                             .clipShape(RoundedRectangle(cornerRadius: 8))
                                             .overlay(
                                                 RoundedRectangle(cornerRadius: 8)
