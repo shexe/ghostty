@@ -2,26 +2,38 @@ import SwiftUI
 import AppKit
 import GhosttyKit
 
+/// A per-surface compose draft: unsent text and attached images.
+class ComposeDraft {
+    var text: String = ""
+    var images: [NSImage] = []
+
+    var isEmpty: Bool { text.isEmpty && images.isEmpty }
+}
+
 /// Stores in-progress compose box drafts per surface so a draft survives the
 /// panel being closed or the surface losing focus. Keys are held weakly so
 /// entries disappear with their surface.
 class ComposeDraftStore {
     static let shared = ComposeDraftStore()
 
-    private let drafts = NSMapTable<Ghostty.SurfaceView, NSString>(
+    private let drafts = NSMapTable<Ghostty.SurfaceView, ComposeDraft>(
         keyOptions: .weakMemory,
         valueOptions: .strongMemory)
 
-    func draft(for surface: Ghostty.SurfaceView) -> String {
-        drafts.object(forKey: surface) as String? ?? ""
+    func draft(for surface: Ghostty.SurfaceView) -> ComposeDraft {
+        if let existing = drafts.object(forKey: surface) { return existing }
+        let draft = ComposeDraft()
+        drafts.setObject(draft, forKey: surface)
+        return draft
     }
 
+    func clear(for surface: Ghostty.SurfaceView) {
+        drafts.removeObject(forKey: surface)
+    }
+
+    // Convenience for the auto-popup seed path.
     func setDraft(_ text: String, for surface: Ghostty.SurfaceView) {
-        if text.isEmpty {
-            drafts.removeObject(forKey: surface)
-        } else {
-            drafts.setObject(text as NSString, forKey: surface)
-        }
+        draft(for: surface).text = text
     }
 }
 
@@ -84,13 +96,23 @@ struct TerminalComposeBoxView: View {
     @Binding var isPresented: Bool
 
     @State private var text: String = ""
+    @State private var attachments: [NSImage] = []
     @State private var textHeight: CGFloat = 0
 
     /// Match the terminal's rendered text size: a cell is one line of the
-    /// terminal font, and its point size is ~0.85x the cell height.
+    /// terminal font, and its point size is ~0.85x the cell height. The
+    /// family comes from compose-font-family, defaulting to the system font.
     private var font: NSFont {
         let cellHeight = surfaceView.cellSize.height
-        return .systemFont(ofSize: cellHeight > 0 ? cellHeight * 0.85 : 13)
+        let size = cellHeight > 0 ? cellHeight * 0.85 : 13
+        if let family = (NSApp.delegate as? AppDelegate)?.ghostty.config.composeFontFamily {
+            if let named = NSFont(name: family, size: size) { return named }
+            if let familyFont = NSFontManager.shared.font(
+                withFamily: family, traits: [], weight: 5, size: size) {
+                return familyFont
+            }
+        }
+        return .systemFont(ofSize: size)
     }
 
     /// The width of the terminal's text grid (columns x cell width) in
@@ -119,14 +141,48 @@ struct TerminalComposeBoxView: View {
                     VStack(spacing: 0) {
                         Spacer()
 
-                        ComposeTextView(
-                            text: $text,
-                            height: $textHeight,
-                            font: font,
-                            onSend: send(submit:),
-                            onDismiss: { isPresented = false })
-                            .frame(height: min(max(textHeight, minTextHeight), maxTextHeight))
-                            .padding(14)
+                        VStack(alignment: .leading, spacing: 10) {
+                            if !attachments.isEmpty {
+                                HStack(spacing: 8) {
+                                    ForEach(attachments.indices, id: \.self) { i in
+                                        Image(nsImage: attachments[i])
+                                            .resizable()
+                                            .aspectRatio(contentMode: .fill)
+                                            .frame(width: 72, height: 72)
+                                            .clipShape(RoundedRectangle(cornerRadius: 8))
+                                            .overlay(
+                                                RoundedRectangle(cornerRadius: 8)
+                                                    .strokeBorder(.separator, lineWidth: 1))
+                                            .overlay(alignment: .topTrailing) {
+                                                Button {
+                                                    attachments.remove(at: i)
+                                                    syncDraft()
+                                                } label: {
+                                                    Image(systemName: "xmark.circle.fill")
+                                                        .foregroundStyle(.secondary)
+                                                        .background(Circle().fill(.background))
+                                                }
+                                                .buttonStyle(.plain)
+                                                .padding(3)
+                                            }
+                                    }
+                                    Spacer()
+                                }
+                            }
+
+                            ComposeTextView(
+                                text: $text,
+                                height: $textHeight,
+                                font: font,
+                                onSend: send(submit:),
+                                onDismiss: { isPresented = false },
+                                onPasteImage: { image in
+                                    attachments.append(image)
+                                    syncDraft()
+                                })
+                                .frame(height: min(max(textHeight, minTextHeight), maxTextHeight))
+                        }
+                        .padding(14)
                         .background(
                             Color(nsColor: .textBackgroundColor),
                             in: RoundedRectangle(cornerRadius: 16))
@@ -142,11 +198,11 @@ struct TerminalComposeBoxView: View {
                     .frame(width: geometry.size.width, height: geometry.size.height)
                 }
                 .onAppear {
-                    text = ComposeDraftStore.shared.draft(for: surfaceView)
+                    let draft = ComposeDraftStore.shared.draft(for: surfaceView)
+                    text = draft.text
+                    attachments = draft.images
                 }
-                .onChange(of: text) { newValue in
-                    ComposeDraftStore.shared.setDraft(newValue, for: surfaceView)
-                }
+                .onChange(of: text) { _ in syncDraft() }
             }
         }
         .onChange(of: isPresented) { newValue in
@@ -160,25 +216,64 @@ struct TerminalComposeBoxView: View {
         }
     }
 
+    private func syncDraft() {
+        let draft = ComposeDraftStore.shared.draft(for: surfaceView)
+        draft.text = text
+        draft.images = attachments
+    }
+
     private func send(submit: Bool) {
         guard let surface = surfaceView.surfaceModel else { return }
         let content = text
-        guard !content.isEmpty else {
+        let images = attachments
+        guard !content.isEmpty || !images.isEmpty else {
             isPresented = false
             return
+        }
+
+        // Images are delivered the way Claude Code ingests them: put each on
+        // the system clipboard and send Ctrl+V, staggered so it has time to
+        // read the clipboard before the next paste replaces it.
+        var delay: TimeInterval = 0
+        for image in images {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.writeObjects([image])
+                // The legacy key encoding derives Ctrl+V's control byte
+                // (0x16) from the key's codepoint, so both must be set or
+                // nothing reaches the pty.
+                surface.sendKeyEvent(.init(
+                    key: .v,
+                    action: .press,
+                    text: "\u{16}",
+                    mods: .ctrl,
+                    unshiftedCodepoint: 0x76))
+                surface.sendKeyEvent(.init(
+                    key: .v,
+                    action: .release,
+                    mods: .ctrl,
+                    unshiftedCodepoint: 0x76))
+            }
+            delay += 0.35
         }
 
         // The core treats surface text input as a paste, so multi-line
         // content arrives as one bracketed-paste block and embedded newlines
         // don't submit. Submission is a separate synthetic Enter.
-        surface.sendText(content)
-        if submit {
-            surface.sendKeyEvent(.init(key: .enter, action: .press))
-            surface.sendKeyEvent(.init(key: .enter, action: .release))
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+            if !content.isEmpty {
+                surface.sendText(content)
+            }
+            if submit {
+                surface.sendKeyEvent(.init(key: .enter, action: .press))
+                surface.sendKeyEvent(.init(key: .enter, action: .release))
+            }
         }
 
         text = ""
-        ComposeDraftStore.shared.setDraft("", for: surfaceView)
+        attachments = []
+        ComposeDraftStore.shared.clear(for: surfaceView)
         isPresented = false
     }
 }
@@ -196,6 +291,7 @@ private struct ComposeTextView: NSViewRepresentable {
     var font: NSFont
     var onSend: (Bool) -> Void
     var onDismiss: () -> Void
+    var onPasteImage: (NSImage) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -218,6 +314,7 @@ private struct ComposeTextView: NSViewRepresentable {
         textView.textContainer?.widthTracksTextView = true
         textView.onSend = onSend
         textView.onDismiss = onDismiss
+        textView.onPasteImage = onPasteImage
 
         let scrollView = NSScrollView()
         scrollView.documentView = textView
@@ -238,6 +335,7 @@ private struct ComposeTextView: NSViewRepresentable {
         context.coordinator.parent = self
         textView.onSend = onSend
         textView.onDismiss = onDismiss
+        textView.onPasteImage = onPasteImage
         if textView.font != font {
             textView.font = font
         }
@@ -277,6 +375,24 @@ private struct ComposeTextView: NSViewRepresentable {
 private class ComposeNSTextView: NSTextView {
     var onSend: ((Bool) -> Void)?
     var onDismiss: (() -> Void)?
+    var onPasteImage: ((NSImage) -> Void)?
+
+    /// An image on the clipboard becomes an attachment, claude.ai-style;
+    /// anything else pastes as text. NSImage(pasteboard:) also reads image
+    /// files copied in Finder.
+    private func pasteClipboard() {
+        let pasteboard = NSPasteboard.general
+        if pasteboard.string(forType: .string) == nil,
+           let image = NSImage(pasteboard: pasteboard) {
+            onPasteImage?(image)
+            return
+        }
+        super.paste(nil)
+    }
+
+    override func paste(_ sender: Any?) {
+        pasteClipboard()
+    }
 
     /// The modifier combo (on Enter) that inserts without submitting, from
     /// the compose-insert-key config option. Default: Cmd+Shift+Enter.
@@ -327,6 +443,13 @@ private class ComposeNSTextView: NSTextView {
         // than through the key-equivalent path.
         let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
         if handleEnterCombo(event, mods: mods) { return }
+
+        // Ctrl+V pastes too (Claude Code habit for images).
+        if event.keyCode == 0x09 && mods == [.control] {
+            pasteClipboard()
+            return
+        }
+
         super.keyDown(with: event)
     }
 
@@ -336,6 +459,14 @@ private class ComposeNSTextView: NSTextView {
         let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
 
         if handleEnterCombo(event, mods: mods) {
+            return true
+        }
+
+        // Cmd+V: Ghostty's Edit > Paste menu item owns this key with a
+        // selector we don't implement, which would otherwise swallow the
+        // keystroke entirely while the panel is focused.
+        if event.keyCode == 0x09 && mods == [.command] {
+            pasteClipboard()
             return true
         }
 

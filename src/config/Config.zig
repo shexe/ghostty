@@ -1549,6 +1549,11 @@ title: ?[:0]const u8 = null,
 /// macOS only. (Fork addition.)
 @"compose-insert-key": ?[:0]const u8 = null,
 
+/// The font family for the compose box text. Accepts a font display or
+/// PostScript name (e.g. `SF Mono`, `SFMono-Medium`, `Menlo`). When unset,
+/// the compose box uses the system font. macOS only. (Fork addition.)
+@"compose-font-family": ?[:0]const u8 = null,
+
 /// The setting that will change the application class value.
 ///
 /// This controls the class field of the `WM_CLASS` X11 property (when running

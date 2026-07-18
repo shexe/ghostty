@@ -683,9 +683,7 @@ class BaseTerminalController: NSWindowController,
         guard surfaceTree.contains(surfaceView) else { return }
         guard !composeBoxIsShowing else { return }
         if let seed = notification.userInfo?[Notification.Name.ghosttyComposeSeedKey] as? String {
-            ComposeDraftStore.shared.setDraft(
-                ComposeDraftStore.shared.draft(for: surfaceView) + seed,
-                for: surfaceView)
+            ComposeDraftStore.shared.draft(for: surfaceView).text += seed
         }
         composeBoxIsShowing = true
     }
