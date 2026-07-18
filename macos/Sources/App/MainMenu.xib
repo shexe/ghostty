@@ -340,6 +340,11 @@
                                     <action selector="toggleCommandPalette:" target="-1" id="FcT-XD-gM1"/>
                                 </connections>
                             </menuItem>
+                            <menuItem title="Compose Box" keyEquivalent=";" id="CBx-tg-001">
+                                <connections>
+                                    <action selector="toggleComposeBox:" target="-1" id="CBx-ac-001"/>
+                                </connections>
+                            </menuItem>
                             <menuItem title="Change Tab Title..." id="iac-lh-Cl7">
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>
