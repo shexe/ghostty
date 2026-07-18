@@ -56,6 +56,9 @@ class BaseTerminalController: NSWindowController,
     /// This can be set to show/hide the command palette.
     @Published var commandPaletteIsShowing: Bool = false
 
+    /// This can be set to show/hide the compose box.
+    @Published var composeBoxIsShowing: Bool = false
+
     /// Set if the terminal view should show the update overlay.
     @Published var updateOverlayIsVisible: Bool = false
 
@@ -1443,6 +1446,10 @@ class BaseTerminalController: NSWindowController,
             // instead of the first responder (command palette).
             _ = focusedSurface?.resignFirstResponder()
         }
+    }
+
+    @IBAction func toggleComposeBox(_ sender: Any?) {
+        composeBoxIsShowing.toggle()
     }
 
     @IBAction func find(_ sender: Any) {
