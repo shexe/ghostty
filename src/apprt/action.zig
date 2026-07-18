@@ -118,6 +118,12 @@ pub const Action = union(Key) {
     /// Toggle the command palette.
     toggle_command_palette,
 
+    /// Toggle the compose box (macOS only; fork addition).
+    toggle_compose,
+
+    /// Toggle compose box auto-popup on the surface (macOS only; fork addition).
+    toggle_compose_auto_popup,
+
     /// Toggle the visibility of all Ghostty terminal windows.
     toggle_visibility,
 
@@ -378,6 +384,8 @@ pub const Action = union(Key) {
         toggle_window_decorations,
         toggle_quick_terminal,
         toggle_command_palette,
+        toggle_compose,
+        toggle_compose_auto_popup,
         toggle_visibility,
         toggle_background_opacity,
         move_tab,
