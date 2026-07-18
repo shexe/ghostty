@@ -460,6 +460,15 @@ extension Ghostty {
             return v
         }
 
+        var composeFontFamily: String? {
+            guard let config = self.config else { return nil }
+            var v: UnsafePointer<Int8>?
+            let key = "compose-font-family"
+            guard ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8))) else { return nil }
+            guard let ptr = v else { return nil }
+            return String(cString: ptr)
+        }
+
         var composeInsertKey: String? {
             guard let config = self.config else { return nil }
             var v: UnsafePointer<Int8>?
