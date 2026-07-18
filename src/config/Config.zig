@@ -1540,6 +1540,15 @@ fullscreen: Fullscreen = .false,
 /// to get the new title.
 title: ?[:0]const u8 = null,
 
+/// The key combination that inserts the compose box contents into the
+/// terminal without submitting (no trailing Enter). The format is a
+/// `+`-separated list of modifiers plus `enter`, e.g. `cmd+shift+enter`
+/// (the default) or `cmd+opt+enter`. Modifiers: `cmd`/`command`/`super`,
+/// `shift`, `opt`/`option`/`alt`, `ctrl`/`control`. The combination must
+/// include at least one modifier. `cmd+enter` always sends and submits.
+/// macOS only. (Fork addition.)
+@"compose-insert-key": ?[:0]const u8 = null,
+
 /// The setting that will change the application class value.
 ///
 /// This controls the class field of the `WM_CLASS` X11 property (when running

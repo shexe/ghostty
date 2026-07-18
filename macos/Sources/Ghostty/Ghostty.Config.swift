@@ -460,6 +460,15 @@ extension Ghostty {
             return v
         }
 
+        var composeInsertKey: String? {
+            guard let config = self.config else { return nil }
+            var v: UnsafePointer<Int8>?
+            let key = "compose-insert-key"
+            guard ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8))) else { return nil }
+            guard let ptr = v else { return nil }
+            return String(cString: ptr)
+        }
+
         var backgroundColor: Color {
             var color: ghostty_config_color_s = .init()
             let bg_key = "background"
