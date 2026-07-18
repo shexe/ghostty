@@ -1112,6 +1112,26 @@ extension Ghostty {
             quickLook(with: event)
         }
 
+        /// Compose auto-popup (fork): route the clipboard (text or image)
+        /// into the compose box. Returns true if there was content to route.
+        private func composeAutoPopupPaste() -> Bool {
+            let pasteboard = NSPasteboard.general
+            var userInfo: [AnyHashable: Any] = [:]
+            if let string = pasteboard.string(forType: .string), !string.isEmpty {
+                userInfo[Foundation.Notification.Name.ghosttyComposeSeedKey] = string
+            } else if let image = NSImage(pasteboard: pasteboard) {
+                userInfo[Foundation.Notification.Name.ghosttyComposeSeedImageKey] = image
+            } else {
+                return false
+            }
+
+            NotificationCenter.default.post(
+                name: .ghosttyComposeAutoPopup,
+                object: self,
+                userInfo: userInfo)
+            return true
+        }
+
         override func keyDown(with event: NSEvent) {
             guard let surface = self.surface else {
                 self.interpretKeyEvents([event])
@@ -1127,12 +1147,20 @@ extension Ghostty {
             if keySequence.isEmpty,
                keyTables.isEmpty,
                !hasMarkedText(),
-               ComposeAutoPopupStore.shouldIntercept(event, surfaceView: self) {
-                NotificationCenter.default.post(
-                    name: .ghosttyComposeAutoPopup,
-                    object: self,
-                    userInfo: [Foundation.Notification.Name.ghosttyComposeSeedKey: event.characters ?? ""])
-                return
+               ComposeAutoPopupStore.shared.isEnabled(for: self) {
+                if ComposeAutoPopupStore.shouldIntercept(event, surfaceView: self) {
+                    NotificationCenter.default.post(
+                        name: .ghosttyComposeAutoPopup,
+                        object: self,
+                        userInfo: [Foundation.Notification.Name.ghosttyComposeSeedKey: event.characters ?? ""])
+                    return
+                }
+
+                // Ctrl+V routes the clipboard into the compose box too.
+                let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
+                if event.keyCode == 0x09, mods == [.control], composeAutoPopupPaste() {
+                    return
+                }
             }
 
             // We need to translate the mods (maybe) to handle configs such as option-as-alt
@@ -1343,6 +1371,17 @@ extension Ghostty {
             // local event handler).
             if !focused {
                 return false
+            }
+
+            // Compose auto-popup (fork): Cmd+V routes the clipboard (text or
+            // image) into the compose box instead of pasting to the terminal.
+            if keySequence.isEmpty,
+               keyTables.isEmpty,
+               event.keyCode == 0x09,
+               event.modifierFlags.intersection([.command, .shift, .option, .control]) == [.command],
+               ComposeAutoPopupStore.shared.isEnabled(for: self),
+               composeAutoPopupPaste() {
+                return true
             }
 
             // Get information about if this is a binding.

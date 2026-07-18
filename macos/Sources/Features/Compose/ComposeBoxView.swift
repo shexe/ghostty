@@ -41,11 +41,17 @@ extension Notification.Name {
     /// Key in ghosttyComposeAutoPopup userInfo carrying the keystroke text
     /// that triggered the popup, so it seeds the draft.
     static let ghosttyComposeSeedKey = "com.mitchellh.ghostty.composeSeed"
+
+    /// Key in ghosttyComposeAutoPopup userInfo carrying an image pasted in
+    /// the terminal, attached to the draft when the popup opens.
+    static let ghosttyComposeSeedImageKey = "com.mitchellh.ghostty.composeSeedImage"
 }
 
-/// Per-surface auto-popup state: whether plain typing in the terminal should
-/// open the compose box. Off by default; toggled per surface via the
-/// "Auto-Open Compose Box" menu item / toggle_compose_auto_popup keybind.
+/// Per-surface auto-popup state: whether plain typing/pasting in the
+/// terminal should open the compose box. Defaults on when the surface looks
+/// like a Claude Code session (title heuristic) and off otherwise; the
+/// "Auto-Open Compose Box" menu item / toggle_compose_auto_popup keybind
+/// overrides per surface.
 class ComposeAutoPopupStore {
     static let shared = ComposeAutoPopupStore()
 
@@ -53,8 +59,18 @@ class ComposeAutoPopupStore {
         keyOptions: .weakMemory,
         valueOptions: .strongMemory)
 
+    /// Claude Code sets the terminal title with a leading spinner glyph
+    /// (e.g. "✳ Fixing the parser"); a plain shell shows a path. This is
+    /// the best available signal — the terminal cannot know what program
+    /// is attached to the pty.
+    static func titleLooksLikeClaude(_ surface: Ghostty.SurfaceView) -> Bool {
+        guard let first = surface.title.unicodeScalars.first else { return false }
+        return "✳✻✢✶✽·*".unicodeScalars.contains(first)
+    }
+
     func isEnabled(for surface: Ghostty.SurfaceView) -> Bool {
-        overrides.object(forKey: surface)?.boolValue ?? false
+        overrides.object(forKey: surface)?.boolValue
+            ?? Self.titleLooksLikeClaude(surface)
     }
 
     func setOverride(_ enabled: Bool, for surface: Ghostty.SurfaceView) {
@@ -177,6 +193,12 @@ struct TerminalComposeBoxView: View {
                                 onSend: send(submit:),
                                 onDismiss: { isPresented = false },
                                 onPasteImage: { image in
+                                    // Images can only be delivered to Claude
+                                    // Code; refuse the attachment elsewhere.
+                                    guard ComposeAutoPopupStore.titleLooksLikeClaude(surfaceView) else {
+                                        NSSound.beep()
+                                        return
+                                    }
                                     attachments.append(image)
                                     syncDraft()
                                 })
@@ -225,7 +247,10 @@ struct TerminalComposeBoxView: View {
     private func send(submit: Bool) {
         guard let surface = surfaceView.surfaceModel else { return }
         let content = text
-        let images = attachments
+        // Ctrl+V image delivery only makes sense into Claude Code; if the
+        // session ended since attaching, drop images rather than spray
+        // escape sequences at a shell.
+        let images = ComposeAutoPopupStore.titleLooksLikeClaude(surfaceView) ? attachments : []
         guard !content.isEmpty || !images.isEmpty else {
             isPresented = false
             return
