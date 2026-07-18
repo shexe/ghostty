@@ -1121,6 +1121,20 @@ extension Ghostty {
             // On any keyDown event we unset our bell state
             bell = false
 
+            // Compose auto-popup (fork): plain printable typing opens the
+            // compose box seeded with the keystroke instead of reaching the
+            // terminal. Never during IME composition or a key sequence.
+            if keySequence.isEmpty,
+               keyTables.isEmpty,
+               !hasMarkedText(),
+               ComposeAutoPopupStore.shouldIntercept(event, surfaceView: self) {
+                NotificationCenter.default.post(
+                    name: .ghosttyComposeAutoPopup,
+                    object: self,
+                    userInfo: [Foundation.Notification.Name.ghosttyComposeSeedKey: event.characters ?? ""])
+                return
+            }
+
             // We need to translate the mods (maybe) to handle configs such as option-as-alt
             let translationModsGhostty = Ghostty.eventModifierFlags(
                 mods: ghostty_surface_key_translation_mods(

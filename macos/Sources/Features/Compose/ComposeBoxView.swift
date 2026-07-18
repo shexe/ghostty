@@ -25,6 +25,52 @@ class ComposeDraftStore {
     }
 }
 
+extension Notification.Name {
+    /// Key in ghosttyComposeAutoPopup userInfo carrying the keystroke text
+    /// that triggered the popup, so it seeds the draft.
+    static let ghosttyComposeSeedKey = "com.mitchellh.ghostty.composeSeed"
+}
+
+/// Per-surface auto-popup state: whether plain typing in the terminal should
+/// open the compose box. Off by default; toggled per surface via the
+/// "Auto-Open Compose Box" menu item / toggle_compose_auto_popup keybind.
+class ComposeAutoPopupStore {
+    static let shared = ComposeAutoPopupStore()
+
+    private let overrides = NSMapTable<Ghostty.SurfaceView, NSNumber>(
+        keyOptions: .weakMemory,
+        valueOptions: .strongMemory)
+
+    func isEnabled(for surface: Ghostty.SurfaceView) -> Bool {
+        overrides.object(forKey: surface)?.boolValue ?? false
+    }
+
+    func setOverride(_ enabled: Bool, for surface: Ghostty.SurfaceView) {
+        overrides.setObject(NSNumber(value: enabled), forKey: surface)
+    }
+
+    /// Whether this key event should open the compose box instead of going
+    /// to the terminal: plain printable typing, no command/control chords,
+    /// no IME composition or key sequence in progress.
+    static func shouldIntercept(_ event: NSEvent, surfaceView: Ghostty.SurfaceView) -> Bool {
+        guard shared.isEnabled(for: surfaceView) else { return false }
+
+        let mods = event.modifierFlags.intersection([.command, .control])
+        guard mods.isEmpty else { return false }
+
+        guard let characters = event.characters,
+              let scalar = characters.unicodeScalars.first else { return false }
+
+        // Control chars (Esc, Enter, Tab, Backspace...) and function keys
+        // (arrows, F-keys: U+F700 private range) pass through to the terminal.
+        guard scalar.value >= 0x20,
+              scalar.value != 0x7F,
+              !(0xF700...0xF8FF).contains(scalar.value) else { return false }
+
+        return true
+    }
+}
+
 /// A claude.ai-style compose panel docked to the bottom of the terminal view.
 /// Text is edited with full native text view behavior (mouse, selection,
 /// multi-line) and delivered to the terminal as a paste, optionally followed
@@ -197,6 +243,7 @@ private struct ComposeTextView: NSViewRepresentable {
         }
         if textView.string != text {
             textView.string = text
+            textView.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
             context.coordinator.updateHeight(for: textView)
         }
     }

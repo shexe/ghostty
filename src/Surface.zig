@@ -5812,6 +5812,18 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             {},
         ),
 
+        .toggle_compose => return try self.rt_app.performAction(
+            .{ .surface = self },
+            .toggle_compose,
+            {},
+        ),
+
+        .toggle_compose_auto_popup => return try self.rt_app.performAction(
+            .{ .surface = self },
+            .toggle_compose_auto_popup,
+            {},
+        ),
+
         .toggle_background_opacity => return try self.rt_app.performAction(
             .{ .surface = self },
             .toggle_background_opacity,

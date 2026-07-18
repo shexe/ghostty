@@ -812,6 +812,16 @@ pub const Action = union(enum) {
     /// version can be found by running `ghostty +version`.
     toggle_command_palette,
 
+    /// Toggle the compose box, a native text panel for writing multi-line
+    /// prompts that are delivered to the terminal as a paste. macOS only.
+    /// (Fork addition.)
+    toggle_compose,
+
+    /// Toggle auto-popup for the compose box on the focused surface: when
+    /// enabled, plain printable typing opens the compose box seeded with the
+    /// keystroke. macOS only. (Fork addition.)
+    toggle_compose_auto_popup,
+
     /// Toggle the quick terminal.
     ///
     /// The quick terminal, also known as the "Quake-style" or drop-down
@@ -1428,6 +1438,8 @@ pub const Action = union(enum) {
             .toggle_secure_input,
             .toggle_mouse_reporting,
             .toggle_command_palette,
+            .toggle_compose,
+            .toggle_compose_auto_popup,
             .toggle_background_opacity,
             .show_on_screen_keyboard,
             .reset_window_size,
