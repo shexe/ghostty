@@ -179,6 +179,21 @@ class BaseTerminalController: NSWindowController,
             object: nil)
         center.addObserver(
             self,
+            selector: #selector(ghosttyComposeDidToggle(_:)),
+            name: .ghosttyComposeDidToggle,
+            object: nil)
+        center.addObserver(
+            self,
+            selector: #selector(ghosttyComposeAutoPopup(_:)),
+            name: .ghosttyComposeAutoPopup,
+            object: nil)
+        center.addObserver(
+            self,
+            selector: #selector(ghosttyComposeAutoPopupDidToggle(_:)),
+            name: .ghosttyComposeAutoPopupDidToggle,
+            object: nil)
+        center.addObserver(
+            self,
             selector: #selector(ghosttyMaximizeDidToggle(_:)),
             name: .ghosttyMaximizeDidToggle,
             object: nil)
@@ -649,6 +664,30 @@ class BaseTerminalController: NSWindowController,
         guard let surfaceView = notification.object as? Ghostty.SurfaceView else { return }
         guard surfaceTree.contains(surfaceView) else { return }
         toggleCommandPalette(nil)
+    }
+
+    @objc private func ghosttyComposeDidToggle(_ notification: Notification) {
+        guard let surfaceView = notification.object as? Ghostty.SurfaceView else { return }
+        guard surfaceTree.contains(surfaceView) else { return }
+        toggleComposeBox(nil)
+    }
+
+    @objc private func ghosttyComposeAutoPopupDidToggle(_ notification: Notification) {
+        guard let surfaceView = notification.object as? Ghostty.SurfaceView else { return }
+        guard surfaceTree.contains(surfaceView) else { return }
+        toggleComposeAutoPopup(nil)
+    }
+
+    @objc private func ghosttyComposeAutoPopup(_ notification: Notification) {
+        guard let surfaceView = notification.object as? Ghostty.SurfaceView else { return }
+        guard surfaceTree.contains(surfaceView) else { return }
+        guard !composeBoxIsShowing else { return }
+        if let seed = notification.userInfo?[Notification.Name.ghosttyComposeSeedKey] as? String {
+            ComposeDraftStore.shared.setDraft(
+                ComposeDraftStore.shared.draft(for: surfaceView) + seed,
+                for: surfaceView)
+        }
+        composeBoxIsShowing = true
     }
 
     @objc private func ghosttyMaximizeDidToggle(_ notification: Notification) {
@@ -1452,6 +1491,13 @@ class BaseTerminalController: NSWindowController,
         composeBoxIsShowing.toggle()
     }
 
+    @IBAction func toggleComposeAutoPopup(_ sender: Any?) {
+        guard let surfaceView = focusedSurface else { return }
+        ComposeAutoPopupStore.shared.setOverride(
+            !ComposeAutoPopupStore.shared.isEnabled(for: surfaceView),
+            for: surfaceView)
+    }
+
     @IBAction func find(_ sender: Any) {
         focusedSurface?.find(sender)
     }
@@ -1508,6 +1554,13 @@ extension BaseTerminalController: NSMenuItemValidation {
         switch item.action {
         case #selector(findHide):
             return focusedSurface?.searchState != nil
+
+        case #selector(toggleComposeAutoPopup):
+            if let surfaceView = focusedSurface {
+                item.state = ComposeAutoPopupStore.shared.isEnabled(for: surfaceView) ? .on : .off
+                return true
+            }
+            return false
 
         default:
             return true

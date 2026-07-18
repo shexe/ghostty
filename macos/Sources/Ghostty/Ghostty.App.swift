@@ -702,6 +702,12 @@ extension Ghostty {
             case GHOSTTY_ACTION_TOGGLE_COMMAND_PALETTE:
                 toggleCommandPalette(app, target: target)
 
+            case GHOSTTY_ACTION_TOGGLE_COMPOSE:
+                toggleCompose(app, target: target)
+
+            case GHOSTTY_ACTION_TOGGLE_COMPOSE_AUTO_POPUP:
+                toggleComposeAutoPopup(app, target: target)
+
             case GHOSTTY_ACTION_TOGGLE_MAXIMIZE:
                 toggleMaximize(app, target: target)
 
@@ -1125,6 +1131,48 @@ extension Ghostty {
                     userInfo: [
                         Notification.FullscreenModeKey: mode,
                     ]
+                )
+
+            default:
+                assertionFailure()
+            }
+        }
+
+        private static func toggleCompose(
+            _ app: ghostty_app_t,
+            target: ghostty_target_s) {
+            switch target.tag {
+            case GHOSTTY_TARGET_APP:
+                Ghostty.logger.warning("toggle compose does nothing with an app target")
+                return
+
+            case GHOSTTY_TARGET_SURFACE:
+                guard let surface = target.target.surface else { return }
+                guard let surfaceView = self.surfaceView(from: surface) else { return }
+                NotificationCenter.default.post(
+                    name: .ghosttyComposeDidToggle,
+                    object: surfaceView
+                )
+
+            default:
+                assertionFailure()
+            }
+        }
+
+        private static func toggleComposeAutoPopup(
+            _ app: ghostty_app_t,
+            target: ghostty_target_s) {
+            switch target.tag {
+            case GHOSTTY_TARGET_APP:
+                Ghostty.logger.warning("toggle compose auto popup does nothing with an app target")
+                return
+
+            case GHOSTTY_TARGET_SURFACE:
+                guard let surface = target.target.surface else { return }
+                guard let surfaceView = self.surfaceView(from: surface) else { return }
+                NotificationCenter.default.post(
+                    name: .ghosttyComposeAutoPopupDidToggle,
+                    object: surfaceView
                 )
 
             default:
