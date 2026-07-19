@@ -1141,6 +1141,15 @@ extension Ghostty {
             // On any keyDown event we unset our bell state
             bell = false
 
+            // Compose auto-popup one-shot bypass (fork): the Enter that
+            // submits the directly-typed command re-arms auto-popup. The
+            // Enter itself still reaches the terminal below.
+            if event.keyCode == 0x24,
+               !hasMarkedText(),
+               ComposeAutoPopupStore.shared.isBypassed(for: self) {
+                ComposeAutoPopupStore.shared.endBypass(for: self)
+            }
+
             // Compose auto-popup (fork): plain printable typing opens the
             // compose box seeded with the keystroke instead of reaching the
             // terminal. Never during IME composition or a key sequence.
@@ -1373,12 +1382,15 @@ extension Ghostty {
                 return false
             }
 
-            // Compose auto-popup (fork): Cmd+V routes the clipboard (text or
-            // image) into the compose box instead of pasting to the terminal.
+            // Compose auto-popup (fork): Cmd+V or Ctrl+V routes the clipboard
+            // (text or image) into the compose box instead of pasting to the
+            // terminal. Ctrl+V is checked here as well as keyDown because
+            // control chords can be consumed on the key-equivalent path.
+            let pasteMods = event.modifierFlags.intersection([.command, .shift, .option, .control])
             if keySequence.isEmpty,
                keyTables.isEmpty,
                event.keyCode == 0x09,
-               event.modifierFlags.intersection([.command, .shift, .option, .control]) == [.command],
+               pasteMods == [.command] || pasteMods == [.control],
                ComposeAutoPopupStore.shared.isEnabled(for: self),
                composeAutoPopupPaste() {
                 return true

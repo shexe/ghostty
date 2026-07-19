@@ -1560,6 +1560,12 @@ title: ?[:0]const u8 = null,
 /// `cmd+enter,shift+enter,ctrl+enter`. macOS only. (Fork addition.)
 @"compose-newline-key": ?[:0]const u8 = null,
 
+/// Pasting at least this many lines of text into the compose box
+/// collapses it into a `[Pasted text #N +K lines]` placeholder (matching
+/// Claude Code's behavior); the full text is expanded when sent. Set to 0
+/// to always paste inline. macOS only. (Fork addition.)
+@"compose-paste-collapse-lines": u32 = 5,
+
 /// The font family for the compose box text. Accepts a font display or
 /// PostScript name (e.g. `SF Mono`, `SFMono-Medium`, `Menlo`). When unset,
 /// the compose box uses the system font. macOS only. (Fork addition.)
