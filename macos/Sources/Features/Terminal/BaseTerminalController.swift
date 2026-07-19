@@ -1501,6 +1501,9 @@ class BaseTerminalController: NSWindowController,
     }
 
     @IBAction func toggleComposeBox(_ sender: Any?) {
+        // compose-enabled off: never open, but still allow closing a box
+        // that was open when the config reloaded.
+        guard ghostty.config.composeEnabled || composeBoxIsShowing else { return }
         composeBoxIsShowing.toggle()
     }
 
@@ -1584,7 +1587,14 @@ extension BaseTerminalController: NSMenuItemValidation {
         case #selector(findHide):
             return focusedSurface?.searchState != nil
 
+        case #selector(toggleComposeBox):
+            return ghostty.config.composeEnabled || composeBoxIsShowing
+
+        case #selector(composeBypassOnce):
+            return ghostty.config.composeEnabled
+
         case #selector(toggleComposeAutoPopup):
+            guard ghostty.config.composeEnabled else { return false }
             if let surfaceView = focusedSurface {
                 item.state = ComposeAutoPopupStore.shared.isEnabled(for: surfaceView) ? .on : .off
                 return true
