@@ -822,6 +822,12 @@ pub const Action = union(enum) {
     /// keystroke. macOS only. (Fork addition.)
     toggle_compose_auto_popup,
 
+    /// One-shot bypass of compose auto-popup: closes the compose box if it
+    /// is open (keeping the draft) and lets you type one command directly
+    /// into the terminal. Auto-popup resumes after the next Enter in the
+    /// terminal. macOS only. (Fork addition.)
+    compose_bypass_once,
+
     /// Toggle the quick terminal.
     ///
     /// The quick terminal, also known as the "Quake-style" or drop-down
@@ -1440,6 +1446,7 @@ pub const Action = union(enum) {
             .toggle_command_palette,
             .toggle_compose,
             .toggle_compose_auto_popup,
+            .compose_bypass_once,
             .toggle_background_opacity,
             .show_on_screen_keyboard,
             .reset_window_size,

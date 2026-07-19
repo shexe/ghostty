@@ -124,6 +124,9 @@ pub const Action = union(Key) {
     /// Toggle compose box auto-popup on the surface (macOS only; fork addition).
     toggle_compose_auto_popup,
 
+    /// One-shot bypass of compose auto-popup (macOS only; fork addition).
+    compose_bypass_once,
+
     /// Toggle the visibility of all Ghostty terminal windows.
     toggle_visibility,
 
@@ -386,6 +389,7 @@ pub const Action = union(Key) {
         toggle_command_palette,
         toggle_compose,
         toggle_compose_auto_popup,
+        compose_bypass_once,
         toggle_visibility,
         toggle_background_opacity,
         move_tab,

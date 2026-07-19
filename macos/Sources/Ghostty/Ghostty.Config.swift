@@ -503,6 +503,14 @@ extension Ghostty {
             return String(cString: ptr)
         }
 
+        var composePasteCollapseLines: UInt32 {
+            guard let config = self.config else { return 5 }
+            var v: CUnsignedInt = 5
+            let key = "compose-paste-collapse-lines"
+            _ = ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8)))
+            return v
+        }
+
         var composeNewlineKey: String? {
             guard let config = self.config else { return nil }
             var v: UnsafePointer<Int8>?
