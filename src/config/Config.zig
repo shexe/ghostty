@@ -1540,14 +1540,25 @@ fullscreen: Fullscreen = .false,
 /// to get the new title.
 title: ?[:0]const u8 = null,
 
-/// The key combination that inserts the compose box contents into the
-/// terminal without submitting (no trailing Enter). The format is a
-/// `+`-separated list of modifiers plus `enter`, e.g. `cmd+shift+enter`
-/// (the default) or `cmd+opt+enter`. Modifiers: `cmd`/`command`/`super`,
-/// `shift`, `opt`/`option`/`alt`, `ctrl`/`control`. The combination must
-/// include at least one modifier. `cmd+enter` always sends and submits.
-/// macOS only. (Fork addition.)
+/// The key combination(s) that insert the compose box contents into the
+/// terminal without submitting (no trailing Enter). The format is one or
+/// more comma-separated combos, each a `+`-separated list of modifiers
+/// plus `enter`, e.g. `cmd+shift+enter` (the default) or
+/// `cmd+opt+enter,ctrl+shift+enter`. Modifiers: `cmd`/`command`/`super`,
+/// `shift`, `opt`/`option`/`alt`, `ctrl`/`control`. macOS only.
+/// (Fork addition.)
 @"compose-insert-key": ?[:0]const u8 = null,
+
+/// The key combination(s) that send the compose box contents to the
+/// terminal, submit them (trailing Enter), and close the box. Same format
+/// as `compose-insert-key`; bare `enter` (the default) is allowed.
+/// macOS only. (Fork addition.)
+@"compose-submit-key": ?[:0]const u8 = null,
+
+/// The key combination(s) that insert a literal newline in the compose
+/// box. Same format as `compose-insert-key`. Default:
+/// `cmd+enter,shift+enter,ctrl+enter`. macOS only. (Fork addition.)
+@"compose-newline-key": ?[:0]const u8 = null,
 
 /// The font family for the compose box text. Accepts a font display or
 /// PostScript name (e.g. `SF Mono`, `SFMono-Medium`, `Menlo`). When unset,
