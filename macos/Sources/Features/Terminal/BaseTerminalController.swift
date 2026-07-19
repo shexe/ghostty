@@ -194,6 +194,11 @@ class BaseTerminalController: NSWindowController,
             object: nil)
         center.addObserver(
             self,
+            selector: #selector(ghosttyComposeBypassOnce(_:)),
+            name: .ghosttyComposeBypassOnce,
+            object: nil)
+        center.addObserver(
+            self,
             selector: #selector(ghosttyMaximizeDidToggle(_:)),
             name: .ghosttyMaximizeDidToggle,
             object: nil)
@@ -678,13 +683,19 @@ class BaseTerminalController: NSWindowController,
         toggleComposeAutoPopup(nil)
     }
 
+    @objc private func ghosttyComposeBypassOnce(_ notification: Notification) {
+        guard let surfaceView = notification.object as? Ghostty.SurfaceView else { return }
+        guard surfaceTree.contains(surfaceView) else { return }
+        composeBypassOnce(nil)
+    }
+
     @objc private func ghosttyComposeAutoPopup(_ notification: Notification) {
         guard let surfaceView = notification.object as? Ghostty.SurfaceView else { return }
         guard surfaceTree.contains(surfaceView) else { return }
         guard !composeBoxIsShowing else { return }
         let draft = ComposeDraftStore.shared.draft(for: surfaceView)
         if let seed = notification.userInfo?[Notification.Name.ghosttyComposeSeedKey] as? String {
-            draft.text += seed
+            draft.text += ComposeDraftStore.collapsedToken(for: seed, surface: surfaceView) ?? seed
         }
         if let image = notification.userInfo?[Notification.Name.ghosttyComposeSeedImageKey] as? NSImage {
             draft.images.append(image)
@@ -1498,6 +1509,22 @@ class BaseTerminalController: NSWindowController,
         ComposeAutoPopupStore.shared.setOverride(
             !ComposeAutoPopupStore.shared.isEnabled(for: surfaceView),
             for: surfaceView)
+    }
+
+    /// One-shot auto-popup bypass (compose_bypass_once): close the compose
+    /// box if it's open (draft survives), then let typing reach the terminal
+    /// directly until the next Enter re-arms auto-popup. Reached via the
+    /// menu item so its key equivalent works even while the compose box has
+    /// focus, where surface-level keybinds aren't processed.
+    @IBAction func composeBypassOnce(_ sender: Any?) {
+        guard let surfaceView = focusedSurface else { return }
+        ComposeAutoPopupStore.shared.beginBypass(for: surfaceView)
+        if composeBoxIsShowing {
+            // Dismissing the box returns focus to the surface.
+            composeBoxIsShowing = false
+        } else {
+            surfaceView.window?.makeFirstResponder(surfaceView)
+        }
     }
 
     @IBAction func find(_ sender: Any) {
