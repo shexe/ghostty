@@ -103,6 +103,9 @@ class ComposeAutoPopupStore {
         valueOptions: .strongMemory)
 
     func isEnabled(for surface: Ghostty.SurfaceView) -> Bool {
+        guard (NSApp.delegate as? AppDelegate)?.ghostty.config.composeEnabled ?? true else {
+            return false
+        }
         if isBypassed(for: surface) { return false }
         return overrides.object(forKey: surface)?.boolValue
             ?? Self.titleLooksLikeClaude(surface)

@@ -503,6 +503,14 @@ extension Ghostty {
             return String(cString: ptr)
         }
 
+        var composeEnabled: Bool {
+            guard let config = self.config else { return true }
+            var v = true
+            let key = "compose-enabled"
+            _ = ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8)))
+            return v
+        }
+
         var composePasteCollapseLines: UInt32 {
             guard let config = self.config else { return 5 }
             var v: CUnsignedInt = 5
