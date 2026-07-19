@@ -77,6 +77,7 @@ class AppDelegate: NSObject,
     @IBOutlet private var menuCommandPalette: NSMenuItem?
     @IBOutlet private var menuComposeBox: NSMenuItem?
     @IBOutlet private var menuComposeAutoPopup: NSMenuItem?
+    @IBOutlet private var menuComposeBypassOnce: NSMenuItem?
 
     @IBOutlet private var menuEqualizeSplits: NSMenuItem?
     @IBOutlet private var menuMoveSplitDividerUp: NSMenuItem?
@@ -1216,6 +1217,7 @@ extension AppDelegate {
         syncMenuShortcut(config, action: "toggle_command_palette", menuItem: self.menuCommandPalette)
         syncMenuShortcut(config, action: "toggle_compose", menuItem: self.menuComposeBox)
         syncMenuShortcut(config, action: "toggle_compose_auto_popup", menuItem: self.menuComposeAutoPopup)
+        syncMenuShortcut(config, action: "compose_bypass_once", menuItem: self.menuComposeBypassOnce)
 
         syncMenuShortcut(config, action: "toggle_secure_input", menuItem: self.menuSecureInput)
 

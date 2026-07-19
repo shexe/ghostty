@@ -795,6 +795,7 @@ pub const Application = extern struct {
             .toggle_command_palette => return Action.toggleCommandPalette(target),
             .toggle_compose => {},
             .toggle_compose_auto_popup => {},
+            .compose_bypass_once => {},
             .toggle_split_zoom => return Action.toggleSplitZoom(target),
             .show_on_screen_keyboard => return Action.showOnScreenKeyboard(target),
             .command_finished => return Action.commandFinished(target, value),

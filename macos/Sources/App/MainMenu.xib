@@ -26,6 +26,7 @@
                 <outlet property="menuCommandPalette" destination="et6-de-Mh7" id="53t-cu-dm5"/>
                 <outlet property="menuComposeBox" destination="CBx-tg-001" id="CBx-ol-001"/>
                 <outlet property="menuComposeAutoPopup" destination="CBx-ap-001" id="CBx-ol-002"/>
+                <outlet property="menuComposeBypassOnce" destination="CBx-by-001" id="CBx-ol-003"/>
                 <outlet property="menuCopy" destination="Jqf-pv-Zcu" id="bKd-1C-oy9"/>
                 <outlet property="menuDecreaseFontSize" destination="kzb-SZ-dOA" id="Y1B-Vh-6Z2"/>
                 <outlet property="menuEqualizeSplits" destination="3gH-VD-vL9" id="SiZ-ce-FOF"/>
@@ -352,6 +353,12 @@
                                 <modifierMask key="keyEquivalentModifierMask"/>
                                 <connections>
                                     <action selector="toggleComposeAutoPopup:" target="-1" id="CBx-ap-002"/>
+                                </connections>
+                            </menuItem>
+                            <menuItem title="Type One Command in Terminal" id="CBx-by-001">
+                                <modifierMask key="keyEquivalentModifierMask"/>
+                                <connections>
+                                    <action selector="composeBypassOnce:" target="-1" id="CBx-by-002"/>
                                 </connections>
                             </menuItem>
                             <menuItem title="Change Tab Title..." id="iac-lh-Cl7">

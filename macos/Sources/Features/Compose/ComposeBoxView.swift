@@ -7,6 +7,13 @@ class ComposeDraft {
     var text: String = ""
     var images: [NSImage] = []
 
+    /// Large pastes are collapsed to a "[Pasted text #N +K lines]"
+    /// placeholder in the editor; this maps each placeholder back to its
+    /// full text for expansion at send time. Deleting a placeholder from
+    /// the draft simply orphans its entry here, which is harmless.
+    var pastes: [String: String] = [:]
+    var pasteCounter: Int = 0
+
     var isEmpty: Bool { text.isEmpty && images.isEmpty }
 }
 
@@ -34,6 +41,26 @@ class ComposeDraftStore {
     // Convenience for the auto-popup seed path.
     func setDraft(_ text: String, for surface: Ghostty.SurfaceView) {
         draft(for: surface).text = text
+    }
+
+    /// If the string is a large paste (compose-paste-collapse-lines),
+    /// registers it on the surface's draft and returns the placeholder
+    /// token to insert instead. Returns nil when it should paste inline.
+    static func collapsedToken(
+        for string: String,
+        surface: Ghostty.SurfaceView
+    ) -> String? {
+        let threshold = (NSApp.delegate as? AppDelegate)?
+            .ghostty.config.composePasteCollapseLines ?? 5
+        guard threshold > 0 else { return nil }
+        let lines = string.components(separatedBy: "\n").count
+        guard lines >= threshold else { return nil }
+
+        let draft = shared.draft(for: surface)
+        draft.pasteCounter += 1
+        let token = "[Pasted text #\(draft.pasteCounter) +\(lines - 1) lines]"
+        draft.pastes[token] = string
+        return token
     }
 }
 
@@ -68,13 +95,33 @@ class ComposeAutoPopupStore {
         return "✳✻✢✶✽·*".unicodeScalars.contains(first)
     }
 
+    /// Surfaces with a one-shot bypass active (compose_bypass_once): the
+    /// next command is typed directly into the terminal, and auto-popup
+    /// resumes after Enter.
+    private let bypassed = NSMapTable<Ghostty.SurfaceView, NSNumber>(
+        keyOptions: .weakMemory,
+        valueOptions: .strongMemory)
+
     func isEnabled(for surface: Ghostty.SurfaceView) -> Bool {
-        overrides.object(forKey: surface)?.boolValue
+        if isBypassed(for: surface) { return false }
+        return overrides.object(forKey: surface)?.boolValue
             ?? Self.titleLooksLikeClaude(surface)
     }
 
     func setOverride(_ enabled: Bool, for surface: Ghostty.SurfaceView) {
         overrides.setObject(NSNumber(value: enabled), forKey: surface)
+    }
+
+    func isBypassed(for surface: Ghostty.SurfaceView) -> Bool {
+        bypassed.object(forKey: surface)?.boolValue ?? false
+    }
+
+    func beginBypass(for surface: Ghostty.SurfaceView) {
+        bypassed.setObject(NSNumber(value: true), forKey: surface)
+    }
+
+    func endBypass(for surface: Ghostty.SurfaceView) {
+        bypassed.removeObject(forKey: surface)
     }
 
     /// Whether this key event should open the compose box instead of going
@@ -114,6 +161,10 @@ struct TerminalComposeBoxView: View {
     @State private var text: String = ""
     @State private var attachments: [NSImage] = []
     @State private var textHeight: CGFloat = 0
+
+    /// Incremented to pull first-responder status back to the text view,
+    /// e.g. when typing in the terminal is routed into an already-open box.
+    @State private var focusToken: Int = 0
 
     /// Match the terminal's rendered text size: a cell is one line of the
     /// terminal font, and its point size is ~0.85x the cell height. The
@@ -196,6 +247,7 @@ struct TerminalComposeBoxView: View {
                                 text: $text,
                                 height: $textHeight,
                                 font: font,
+                                focusToken: focusToken,
                                 onSend: send(submit:),
                                 onDismiss: { isPresented = false },
                                 onPasteImage: { image in
@@ -208,7 +260,8 @@ struct TerminalComposeBoxView: View {
                                     attachments.append(image)
                                     syncDraft()
                                 },
-                                onInterrupt: sendInterrupt)
+                                onInterrupt: sendInterrupt,
+                                onCollapsePaste: collapsePaste)
                                 .frame(height: min(max(textHeight, minTextHeight), maxTextHeight))
                         }
                         .padding(14)
@@ -243,6 +296,31 @@ struct TerminalComposeBoxView: View {
                 }
             }
         }
+        // Typing or pasting in the terminal while the box is already open
+        // (focus was in the terminal, e.g. after clicking it) routes here:
+        // append to the open box and pull focus back into it, instead of
+        // the input silently vanishing.
+        .onReceive(NotificationCenter.default.publisher(for: .ghosttyComposeAutoPopup)) { notification in
+            guard isPresented,
+                  let object = notification.object as? Ghostty.SurfaceView,
+                  object === surfaceView else { return }
+            if let seed = notification.userInfo?[Notification.Name.ghosttyComposeSeedKey] as? String {
+                text += ComposeDraftStore.collapsedToken(for: seed, surface: surfaceView) ?? seed
+            }
+            if let image = notification.userInfo?[Notification.Name.ghosttyComposeSeedImageKey] as? NSImage,
+               ComposeAutoPopupStore.titleLooksLikeClaude(surfaceView) {
+                attachments.append(image)
+            }
+            syncDraft()
+            focusToken += 1
+        }
+    }
+
+    /// Decides whether a pasted string collapses to a placeholder
+    /// (compose-paste-collapse-lines). Returns the placeholder token to
+    /// insert, or nil to paste inline.
+    private func collapsePaste(_ string: String) -> String? {
+        ComposeDraftStore.collapsedToken(for: string, surface: surfaceView)
     }
 
     private func syncDraft() {
@@ -274,7 +352,11 @@ struct TerminalComposeBoxView: View {
 
     private func send(submit: Bool) {
         guard let surface = surfaceView.surfaceModel else { return }
-        let content = text
+        // Expand collapsed-paste placeholders back to their full text.
+        var content = text
+        for (token, full) in ComposeDraftStore.shared.draft(for: surfaceView).pastes {
+            content = content.replacingOccurrences(of: token, with: full)
+        }
         // Ctrl+V image delivery only makes sense into Claude Code; if the
         // session ended since attaching, drop images rather than spray
         // escape sequences at a shell.
@@ -342,10 +424,12 @@ private struct ComposeTextView: NSViewRepresentable {
     @Binding var text: String
     @Binding var height: CGFloat
     var font: NSFont
+    var focusToken: Int
     var onSend: (Bool) -> Void
     var onDismiss: () -> Void
     var onPasteImage: (NSImage) -> Void
     var onInterrupt: () -> Void
+    var onCollapsePaste: (String) -> String?
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -370,6 +454,7 @@ private struct ComposeTextView: NSViewRepresentable {
         textView.onDismiss = onDismiss
         textView.onPasteImage = onPasteImage
         textView.onInterrupt = onInterrupt
+        textView.onCollapsePaste = onCollapsePaste
 
         let scrollView = NSScrollView()
         scrollView.documentView = textView
@@ -388,10 +473,17 @@ private struct ComposeTextView: NSViewRepresentable {
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         guard let textView = scrollView.documentView as? ComposeNSTextView else { return }
         context.coordinator.parent = self
+        if context.coordinator.lastFocusToken != focusToken {
+            context.coordinator.lastFocusToken = focusToken
+            DispatchQueue.main.async {
+                textView.window?.makeFirstResponder(textView)
+            }
+        }
         textView.onSend = onSend
         textView.onDismiss = onDismiss
         textView.onPasteImage = onPasteImage
         textView.onInterrupt = onInterrupt
+        textView.onCollapsePaste = onCollapsePaste
         if textView.font != font {
             textView.font = font
         }
@@ -404,6 +496,7 @@ private struct ComposeTextView: NSViewRepresentable {
 
     class Coordinator: NSObject, NSTextViewDelegate {
         var parent: ComposeTextView
+        var lastFocusToken: Int = 0
 
         init(_ parent: ComposeTextView) {
             self.parent = parent
@@ -433,15 +526,24 @@ private class ComposeNSTextView: NSTextView {
     var onDismiss: (() -> Void)?
     var onPasteImage: ((NSImage) -> Void)?
     var onInterrupt: (() -> Void)?
+    var onCollapsePaste: ((String) -> String?)?
 
     /// An image on the clipboard becomes an attachment, claude.ai-style;
-    /// anything else pastes as text. NSImage(pasteboard:) also reads image
-    /// files copied in Finder.
+    /// large text collapses to a "[Pasted text ...]" placeholder; anything
+    /// else pastes as text. NSImage(pasteboard:) also reads image files
+    /// copied in Finder.
     private func pasteClipboard() {
         let pasteboard = NSPasteboard.general
-        if pasteboard.string(forType: .string) == nil,
-           let image = NSImage(pasteboard: pasteboard) {
-            onPasteImage?(image)
+        guard let string = pasteboard.string(forType: .string) else {
+            if let image = NSImage(pasteboard: pasteboard) {
+                onPasteImage?(image)
+                return
+            }
+            super.paste(nil)
+            return
+        }
+        if let token = onCollapsePaste?(string) {
+            insertText(token, replacementRange: selectedRange())
             return
         }
         super.paste(nil)
@@ -553,8 +655,10 @@ private class ComposeNSTextView: NSTextView {
 
         // Cmd+V: Ghostty's Edit > Paste menu item owns this key with a
         // selector we don't implement, which would otherwise swallow the
-        // keystroke entirely while the panel is focused.
-        if event.keyCode == 0x09 && mods == [.command] {
+        // keystroke entirely while the panel is focused. Ctrl+V is handled
+        // here too: control chords can be consumed on the key-equivalent
+        // path before ever reaching keyDown.
+        if event.keyCode == 0x09 && (mods == [.command] || mods == [.control]) {
             pasteClipboard()
             return true
         }
