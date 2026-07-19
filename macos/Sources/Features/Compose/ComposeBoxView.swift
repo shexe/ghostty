@@ -207,7 +207,8 @@ struct TerminalComposeBoxView: View {
                                     }
                                     attachments.append(image)
                                     syncDraft()
-                                })
+                                },
+                                onInterrupt: sendInterrupt)
                                 .frame(height: min(max(textHeight, minTextHeight), maxTextHeight))
                         }
                         .padding(14)
@@ -248,6 +249,27 @@ struct TerminalComposeBoxView: View {
         let draft = ComposeDraftStore.shared.draft(for: surfaceView)
         draft.text = text
         draft.images = attachments
+    }
+
+    /// Ctrl+C pressed in the compose box: forward it straight to the
+    /// terminal (e.g. to interrupt a running Claude Code turn) and close
+    /// the panel; the draft stays put. Same synthetic-key shape as the
+    /// Ctrl+V image delivery: the legacy encoding derives the control
+    /// byte (0x03) from the key's codepoint, so both are set.
+    private func sendInterrupt() {
+        guard let surface = surfaceView.surfaceModel else { return }
+        surface.sendKeyEvent(.init(
+            key: .c,
+            action: .press,
+            text: "\u{03}",
+            mods: .ctrl,
+            unshiftedCodepoint: 0x63))
+        surface.sendKeyEvent(.init(
+            key: .c,
+            action: .release,
+            mods: .ctrl,
+            unshiftedCodepoint: 0x63))
+        isPresented = false
     }
 
     private func send(submit: Bool) {
@@ -323,6 +345,7 @@ private struct ComposeTextView: NSViewRepresentable {
     var onSend: (Bool) -> Void
     var onDismiss: () -> Void
     var onPasteImage: (NSImage) -> Void
+    var onInterrupt: () -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -346,6 +369,7 @@ private struct ComposeTextView: NSViewRepresentable {
         textView.onSend = onSend
         textView.onDismiss = onDismiss
         textView.onPasteImage = onPasteImage
+        textView.onInterrupt = onInterrupt
 
         let scrollView = NSScrollView()
         scrollView.documentView = textView
@@ -367,6 +391,7 @@ private struct ComposeTextView: NSViewRepresentable {
         textView.onSend = onSend
         textView.onDismiss = onDismiss
         textView.onPasteImage = onPasteImage
+        textView.onInterrupt = onInterrupt
         if textView.font != font {
             textView.font = font
         }
@@ -407,6 +432,7 @@ private class ComposeNSTextView: NSTextView {
     var onSend: ((Bool) -> Void)?
     var onDismiss: (() -> Void)?
     var onPasteImage: ((NSImage) -> Void)?
+    var onInterrupt: (() -> Void)?
 
     /// An image on the clipboard becomes an attachment, claude.ai-style;
     /// anything else pastes as text. NSImage(pasteboard:) also reads image
@@ -425,45 +451,70 @@ private class ComposeNSTextView: NSTextView {
         pasteClipboard()
     }
 
-    /// The modifier combo (on Enter) that inserts without submitting, from
-    /// the compose-insert-key config option. Default: Cmd+Shift+Enter.
-    private static func insertKeyModifiers() -> NSEvent.ModifierFlags {
-        let fallback: NSEvent.ModifierFlags = [.command, .shift]
-        guard let spec = (NSApp.delegate as? AppDelegate)?.ghostty.config.composeInsertKey else {
-            return fallback
-        }
-
-        var mods: NSEvent.ModifierFlags = []
-        var sawEnter = false
-        for token in spec.lowercased().split(separator: "+") {
-            switch token {
-            case "cmd", "command", "super": mods.insert(.command)
-            case "shift": mods.insert(.shift)
-            case "opt", "option", "alt": mods.insert(.option)
-            case "ctrl", "control": mods.insert(.control)
-            case "enter", "return": sawEnter = true
-            default: return fallback
+    /// Parses a comma-separated list of Enter combos ("enter",
+    /// "cmd+shift+enter", ...) into the modifier sets that trigger it.
+    /// Returns nil if any combo is malformed so the caller falls back to
+    /// the default rather than half-applying a typo'd config.
+    private static func parseEnterCombos(_ spec: String) -> [NSEvent.ModifierFlags]? {
+        var combos: [NSEvent.ModifierFlags] = []
+        for comboSpec in spec.lowercased().split(separator: ",") {
+            var mods: NSEvent.ModifierFlags = []
+            var sawEnter = false
+            for token in comboSpec.split(separator: "+")
+                where !token.trimmingCharacters(in: .whitespaces).isEmpty {
+                switch token.trimmingCharacters(in: .whitespaces) {
+                case "cmd", "command", "super": mods.insert(.command)
+                case "shift": mods.insert(.shift)
+                case "opt", "option", "alt": mods.insert(.option)
+                case "ctrl", "control": mods.insert(.control)
+                case "enter", "return": sawEnter = true
+                default: return nil
+                }
             }
+            guard sawEnter else { return nil }
+            combos.append(mods)
         }
-
-        // Require enter plus at least one modifier; a bare "enter" combo
-        // would swallow the newline key.
-        guard sawEnter, !mods.isEmpty else { return fallback }
-        return mods
+        return combos.isEmpty ? nil : combos
     }
 
-    /// Handles Enter-key combos: the configured insert combo deposits
-    /// without submitting; Cmd+Enter sends and submits. Returns false for
-    /// events that aren't a recognized combo (plain Enter stays a newline).
+    /// What each Enter combo does, from the compose-submit-key /
+    /// compose-insert-key / compose-newline-key config options. Defaults:
+    /// plain Enter submits, Cmd/Shift/Ctrl+Enter insert a newline,
+    /// Cmd+Shift+Enter deposits without submitting.
+    private static func enterComboActions() -> (
+        submit: [NSEvent.ModifierFlags],
+        insert: [NSEvent.ModifierFlags],
+        newline: [NSEvent.ModifierFlags]
+    ) {
+        let config = (NSApp.delegate as? AppDelegate)?.ghostty.config
+        let submit = config?.composeSubmitKey.flatMap(Self.parseEnterCombos)
+            ?? [[]]
+        let insert = config?.composeInsertKey.flatMap(Self.parseEnterCombos)
+            ?? [[.command, .shift]]
+        let newline = config?.composeNewlineKey.flatMap(Self.parseEnterCombos)
+            ?? [[.command], [.shift], [.control]]
+        return (submit, insert, newline)
+    }
+
+    /// Handles Enter-key combos per the configured actions. Returns false
+    /// for combos bound to nothing, which fall through to default text
+    /// view handling.
     private func handleEnterCombo(_ event: NSEvent, mods: NSEvent.ModifierFlags) -> Bool {
         guard event.keyCode == 0x24 else { return false }
 
-        if mods == Self.insertKeyModifiers(), !mods.isEmpty {
+        let actions = Self.enterComboActions()
+        if actions.submit.contains(mods) {
+            onSend?(true)
+            return true
+        }
+        if actions.insert.contains(mods) {
             onSend?(false)
             return true
         }
-        if mods.contains(.command) {
-            onSend?(true)
+        if actions.newline.contains(mods) {
+            // Insert explicitly: combos with cmd/ctrl arrive via the
+            // key-equivalent path where super would just beep.
+            insertNewline(nil)
             return true
         }
         return false
@@ -478,6 +529,13 @@ private class ComposeNSTextView: NSTextView {
         // Ctrl+V pastes too (Claude Code habit for images).
         if event.keyCode == 0x09 && mods == [.control] {
             pasteClipboard()
+            return
+        }
+
+        // Ctrl+C goes straight through to the terminal so an interrupt
+        // doesn't require dismissing the panel first.
+        if event.keyCode == 0x08 && mods == [.control] {
+            onInterrupt?()
             return
         }
 
