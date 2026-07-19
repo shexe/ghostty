@@ -1540,6 +1540,12 @@ fullscreen: Fullscreen = .false,
 /// to get the new title.
 title: ?[:0]const u8 = null,
 
+/// Master switch for the compose box feature. When false, the compose
+/// box cannot be opened (keybind or menu), auto-popup never triggers,
+/// and typing/pasting is never routed away from the terminal. All other
+/// compose-* options are inert. macOS only. (Fork addition.)
+@"compose-enabled": bool = true,
+
 /// The key combination(s) that insert the compose box contents into the
 /// terminal without submitting (no trailing Enter). The format is one or
 /// more comma-separated combos, each a `+`-separated list of modifiers
