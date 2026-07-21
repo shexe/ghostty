@@ -1516,11 +1516,16 @@ class BaseTerminalController: NSWindowController,
 
     /// One-shot auto-popup bypass (compose_bypass_once): close the compose
     /// box if it's open (draft survives), then let typing reach the terminal
-    /// directly until the next Enter re-arms auto-popup. Reached via the
+    /// directly until the next Enter re-arms auto-popup. Pressing the
+    /// shortcut again while the bypass is armed cancels it. Reached via the
     /// menu item so its key equivalent works even while the compose box has
     /// focus, where surface-level keybinds aren't processed.
     @IBAction func composeBypassOnce(_ sender: Any?) {
         guard let surfaceView = focusedSurface else { return }
+        if ComposeAutoPopupStore.shared.isBypassed(for: surfaceView) {
+            ComposeAutoPopupStore.shared.endBypass(for: surfaceView)
+            return
+        }
         ComposeAutoPopupStore.shared.beginBypass(for: surfaceView)
         if composeBoxIsShowing {
             // Dismissing the box returns focus to the surface.
@@ -1591,7 +1596,11 @@ extension BaseTerminalController: NSMenuItemValidation {
             return ghostty.config.composeEnabled || composeBoxIsShowing
 
         case #selector(composeBypassOnce):
-            return ghostty.config.composeEnabled
+            guard ghostty.config.composeEnabled else { return false }
+            if let surfaceView = focusedSurface {
+                item.state = ComposeAutoPopupStore.shared.isBypassed(for: surfaceView) ? .on : .off
+            }
+            return true
 
         case #selector(toggleComposeAutoPopup):
             guard ghostty.config.composeEnabled else { return false }

@@ -1150,6 +1150,14 @@ extension Ghostty {
                 ComposeAutoPopupStore.shared.endBypass(for: self)
             }
 
+            // Compose slash-command handoff (fork): while a "/" command is
+            // being typed directly in the terminal, keep auto-popup
+            // suppressed; submission, cancel, or deleting past the "/"
+            // re-arms it. The key itself still reaches the terminal below.
+            if !hasMarkedText() {
+                ComposeAutoPopupStore.shared.trackSlashCommandKey(event, for: self)
+            }
+
             // Compose auto-popup (fork): plain printable typing opens the
             // compose box seeded with the keystroke instead of reaching the
             // terminal. Never during IME composition or a key sequence.
@@ -1163,6 +1171,14 @@ extension Ghostty {
                         object: self,
                         userInfo: [Foundation.Notification.Name.ghosttyComposeSeedKey: event.characters ?? ""])
                     return
+                }
+
+                // A first-character "/" hands off to the terminal's
+                // slash-command menu; suppress auto-popup until that
+                // command is finished or deleted. The "/" itself falls
+                // through to the terminal below.
+                if ComposeAutoPopupStore.isSlashHandoff(event, surfaceView: self) {
+                    ComposeAutoPopupStore.shared.beginSlashCommand(for: self)
                 }
 
                 // Ctrl+V routes the clipboard into the compose box too.
