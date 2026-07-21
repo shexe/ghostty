@@ -107,6 +107,7 @@ class ComposeAutoPopupStore {
             return false
         }
         if isBypassed(for: surface) { return false }
+        if isInSlashCommand(for: surface) { return false }
         return overrides.object(forKey: surface)?.boolValue
             ?? Self.titleLooksLikeClaude(surface)
     }
@@ -127,6 +128,150 @@ class ComposeAutoPopupStore {
         bypassed.removeObject(forKey: surface)
     }
 
+    /// Per-surface slash-command state: a "/" was handed to the terminal's
+    /// slash-command menu, and auto-popup stays suppressed until the
+    /// command is submitted, cancelled, or deleted. `typed` is the
+    /// best-effort text since and including the "/" (tab-completed text
+    /// can't be seen), so backspacing all the way past the "/" re-arms.
+    /// `answered` marks a dialog answered by a printable key: suppression
+    /// covers that key, then the state ends on the next event.
+    private class SlashCommandState {
+        var typed = "/"
+        var inDialog = false
+        var answered = false
+    }
+
+    private let slashStates = NSMapTable<Ghostty.SurfaceView, SlashCommandState>(
+        keyOptions: .weakMemory,
+        valueOptions: .strongMemory)
+
+    /// Slash commands that follow Enter with an interactive dialog
+    /// (dismissed by a single key like "s" in /model, a digit, Enter, or
+    /// Esc). For these, suppression extends past Enter until one more
+    /// printable key, Enter, or Esc so the answer reaches the dialog
+    /// instead of popping the compose box. Matched by prefix on the
+    /// typed text, since tab-completion hides the full name.
+    private static let dialogCommands = [
+        "model", "config", "usage", "permissions", "mcp", "agents",
+        "status", "hooks", "memory", "resume", "login", "theme", "ide",
+        "help", "todos",
+    ]
+
+    private static func commandOpensDialog(_ typed: String) -> Bool {
+        guard let name = typed.dropFirst() // leading "/"
+            .split(separator: " ").first?.lowercased(),
+              !name.isEmpty else { return false }
+        return dialogCommands.contains { $0.hasPrefix(name) }
+    }
+
+    /// Plain printable typing: what auto-popup would intercept.
+    private static func isPrintableKey(_ event: NSEvent) -> Bool {
+        guard event.modifierFlags.intersection([.command, .control]).isEmpty,
+              let scalar = event.characters?.unicodeScalars.first else { return false }
+        return scalar.value >= 0x20
+            && scalar.value != 0x7F
+            && !(0xF700...0xF8FF).contains(scalar.value)
+    }
+
+    func isInSlashCommand(for surface: Ghostty.SurfaceView) -> Bool {
+        slashStates.object(forKey: surface) != nil
+    }
+
+    func beginSlashCommand(for surface: Ghostty.SurfaceView) {
+        slashStates.setObject(SlashCommandState(), forKey: surface)
+    }
+
+    func endSlashCommand(for surface: Ghostty.SurfaceView) {
+        slashStates.removeObject(forKey: surface)
+    }
+
+    /// Observe a key event headed to the terminal while a slash command
+    /// is in progress. Suppression ends when the command is submitted
+    /// (Enter — or, for dialog commands, one keystroke after Enter),
+    /// cancelled (Esc, Ctrl+C, Ctrl+U, Cmd+Delete), or deleted back past
+    /// the "/". Tab-completion inserts text we can't count, so
+    /// undercounting just keeps the terminal in charge until Enter — the
+    /// safe direction.
+    func trackSlashCommandKey(_ event: NSEvent, for surface: Ghostty.SurfaceView) {
+        guard let state = slashStates.object(forKey: surface) else { return }
+
+        // A printable key answered the dialog on the previous event;
+        // this event gets normal treatment again.
+        if state.answered {
+            endSlashCommand(for: surface)
+            return
+        }
+
+        let mods = event.modifierFlags.intersection([.command, .control, .option])
+
+        if state.inDialog {
+            switch event.keyCode {
+            case 0x24, 0x4C, 0x35: // Enter / Esc dismiss the dialog
+                endSlashCommand(for: surface)
+                return
+            case 0x08 where mods == [.control]: // Ctrl+C
+                endSlashCommand(for: surface)
+                return
+            default:
+                break
+            }
+            // A single printable key (e.g. "s" in /model, a digit choice)
+            // answers and dismisses the dialog. Suppression must still
+            // cover this event so the key reaches the terminal; end on
+            // the next one. Arrows/Tab navigate and keep the dialog open.
+            if Self.isPrintableKey(event) {
+                state.answered = true
+            }
+            return
+        }
+
+        switch event.keyCode {
+        case 0x24, 0x4C: // Return / keypad Enter: submitted
+            if Self.commandOpensDialog(state.typed) {
+                state.inDialog = true
+            } else {
+                endSlashCommand(for: surface)
+            }
+            return
+        case 0x35: // Esc: Claude Code clears the input line
+            endSlashCommand(for: surface)
+            return
+        case 0x33: // Delete
+            if mods.contains(.command) { // delete to line start
+                endSlashCommand(for: surface)
+            } else {
+                // Opt+Delete kills a word we can't measure; removing one
+                // char errs toward staying in the terminal.
+                if !state.typed.isEmpty { state.typed.removeLast() }
+                if state.typed.isEmpty { endSlashCommand(for: surface) }
+            }
+            return
+        case 0x08 where mods == [.control]: // Ctrl+C interrupt
+            endSlashCommand(for: surface)
+            return
+        case 0x20 where mods == [.control]: // Ctrl+U line kill
+            endSlashCommand(for: surface)
+            return
+        default:
+            break
+        }
+
+        if Self.isPrintableKey(event) {
+            state.typed.append(event.characters ?? "")
+        }
+    }
+
+    /// Whether this key event is a "/" that should be handed to the
+    /// terminal's slash-command menu instead of the compose box: first
+    /// character (no existing draft) in a Claude Code tab.
+    static func isSlashHandoff(_ event: NSEvent, surfaceView: Ghostty.SurfaceView) -> Bool {
+        let mods = event.modifierFlags.intersection([.command, .control])
+        guard mods.isEmpty else { return false }
+        return event.characters == "/"
+            && titleLooksLikeClaude(surfaceView)
+            && ComposeDraftStore.shared.draft(for: surfaceView).isEmpty
+    }
+
     /// Whether this key event should open the compose box instead of going
     /// to the terminal: plain printable typing, no command/control chords,
     /// no IME composition or key sequence in progress.
@@ -144,6 +289,12 @@ class ComposeAutoPopupStore {
         guard scalar.value >= 0x20,
               scalar.value != 0x7F,
               !(0xF700...0xF8FF).contains(scalar.value) else { return false }
+
+        // "/" starting a command goes straight to the terminal in a Claude
+        // Code tab, so its slash-command menu drives the interaction. Only
+        // when it would be the first character — an existing draft means
+        // the "/" is part of prose.
+        if isSlashHandoff(event, surfaceView: surfaceView) { return false }
 
         return true
     }
@@ -264,7 +415,8 @@ struct TerminalComposeBoxView: View {
                                     syncDraft()
                                 },
                                 onInterrupt: sendInterrupt,
-                                onCollapsePaste: collapsePaste)
+                                onCollapsePaste: collapsePaste,
+                                onSlashPassthrough: slashPassthrough)
                                 .frame(height: min(max(textHeight, minTextHeight), maxTextHeight))
                         }
                         .padding(14)
@@ -353,6 +505,29 @@ struct TerminalComposeBoxView: View {
         isPresented = false
     }
 
+    /// "/" typed into an empty box in a Claude Code tab: the user wants a
+    /// slash command, whose completion menu lives in the terminal. Close
+    /// the panel and type the "/" there instead. Returns false when the
+    /// tab doesn't look like Claude Code so the "/" inserts normally.
+    private func slashPassthrough() -> Bool {
+        guard ComposeAutoPopupStore.titleLooksLikeClaude(surfaceView),
+              let surface = surfaceView.surfaceModel else { return false }
+        surface.sendKeyEvent(.init(
+            key: .slash,
+            action: .press,
+            text: "/",
+            unshiftedCodepoint: 0x2F))
+        surface.sendKeyEvent(.init(
+            key: .slash,
+            action: .release,
+            unshiftedCodepoint: 0x2F))
+        // Keep auto-popup suppressed until the slash command is
+        // submitted, cancelled, or deleted in the terminal.
+        ComposeAutoPopupStore.shared.beginSlashCommand(for: surfaceView)
+        isPresented = false
+        return true
+    }
+
     private func send(submit: Bool) {
         guard let surface = surfaceView.surfaceModel else { return }
         // Expand collapsed-paste placeholders back to their full text.
@@ -433,6 +608,7 @@ private struct ComposeTextView: NSViewRepresentable {
     var onPasteImage: (NSImage) -> Void
     var onInterrupt: () -> Void
     var onCollapsePaste: (String) -> String?
+    var onSlashPassthrough: () -> Bool
 
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
@@ -458,6 +634,7 @@ private struct ComposeTextView: NSViewRepresentable {
         textView.onPasteImage = onPasteImage
         textView.onInterrupt = onInterrupt
         textView.onCollapsePaste = onCollapsePaste
+        textView.onSlashPassthrough = onSlashPassthrough
 
         let scrollView = NSScrollView()
         scrollView.documentView = textView
@@ -487,6 +664,7 @@ private struct ComposeTextView: NSViewRepresentable {
         textView.onPasteImage = onPasteImage
         textView.onInterrupt = onInterrupt
         textView.onCollapsePaste = onCollapsePaste
+        textView.onSlashPassthrough = onSlashPassthrough
         if textView.font != font {
             textView.font = font
         }
@@ -530,6 +708,7 @@ private class ComposeNSTextView: NSTextView {
     var onPasteImage: ((NSImage) -> Void)?
     var onInterrupt: (() -> Void)?
     var onCollapsePaste: ((String) -> String?)?
+    var onSlashPassthrough: (() -> Bool)?
 
     /// An image on the clipboard becomes an attachment, claude.ai-style;
     /// large text collapses to a "[Pasted text ...]" placeholder; anything
@@ -630,6 +809,17 @@ private class ComposeNSTextView: NSTextView {
         // than through the key-equivalent path.
         let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
         if handleEnterCombo(event, mods: mods) { return }
+
+        // "/" as the first character of an empty box hands off to the
+        // terminal's slash-command menu (Claude Code tabs only; not during
+        // IME composition, where "/" may be part of a composed sequence).
+        if event.characters == "/",
+           mods.intersection([.command, .control, .option]).isEmpty,
+           string.isEmpty,
+           !hasMarkedText(),
+           onSlashPassthrough?() == true {
+            return
+        }
 
         // Ctrl+V pastes too (Claude Code habit for images).
         if event.keyCode == 0x09 && mods == [.control] {
