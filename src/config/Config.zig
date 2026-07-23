@@ -1585,6 +1585,14 @@ title: ?[:0]const u8 = null,
 /// macOS only. (Fork addition.)
 @"compose-thumbnail-size": u32 = 72,
 
+/// Delay in milliseconds between pasting the compose box contents into
+/// the terminal and the synthetic Enter that submits them. Sent with no
+/// delay, Claude Code sometimes drops the Enter while it is still
+/// ingesting the paste (especially when busy), requiring a second manual
+/// Enter. Raise this if submissions are intermittently ignored; 0 sends
+/// the Enter immediately. macOS only. (Fork addition.)
+@"compose-submit-delay-ms": u32 = 50,
+
 /// The setting that will change the application class value.
 ///
 /// This controls the class field of the `WM_CLASS` X11 property (when running
