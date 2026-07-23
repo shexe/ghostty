@@ -64,6 +64,23 @@ class ComposeDraftStore {
     }
 }
 
+/// TEMPORARY diagnostics for the intermittent Enter/Cmd+Delete reports:
+/// NSLog does not reach the unified log from this app, so append to /tmp.
+func composeDebugLog(_ message: String) {
+    let path = "/tmp/ghostty-compose-debug.log"
+    let formatter = DateFormatter()
+    formatter.dateFormat = "HH:mm:ss.SSS"
+    let line = "\(formatter.string(from: Date())) \(message)\n"
+    guard let data = line.data(using: .utf8) else { return }
+    if let handle = FileHandle(forWritingAtPath: path) {
+        handle.seekToEndOfFile()
+        handle.write(data)
+        handle.closeFile()
+    } else {
+        FileManager.default.createFile(atPath: path, contents: data)
+    }
+}
+
 /// Transient per-surface compose UI state (currently just the open image
 /// preview). This lives outside the view because TerminalView recreates
 /// the compose view off lastFocusedSurface: a click that shuffles window
@@ -517,6 +534,9 @@ struct TerminalComposeBoxView: View {
                                             onRemove: {
                                                 attachments.remove(at: i)
                                                 syncDraft()
+                                                // Keep keyboard focus in the
+                                                // editor after mouse work.
+                                                focusToken += 1
                                             })
                                     }
                                     Spacer()
@@ -554,6 +574,9 @@ struct TerminalComposeBoxView: View {
                                 .frame(height: min(max(textHeight, minTextHeight), maxTextHeight))
                         }
                         .padding(14)
+                        // Clicking anywhere on the panel chrome (padding,
+                        // gaps) pulls focus into the editor, claude.ai-style.
+                        .background(ClickCatcher { focusToken += 1 })
                         .background(
                             Color(nsColor: .textBackgroundColor),
                             in: RoundedRectangle(cornerRadius: 16))
@@ -581,7 +604,10 @@ struct TerminalComposeBoxView: View {
                 if let preview = uiState.previewImage {
                     ZStack {
                         Color.black.opacity(0.55)
-                            .overlay(ClickCatcher { uiState.previewImage = nil })
+                            .overlay(ClickCatcher {
+                                uiState.previewImage = nil
+                                focusToken += 1
+                            })
                         Image(nsImage: preview)
                             .resizable()
                             .aspectRatio(contentMode: .fit)
@@ -592,8 +618,11 @@ struct TerminalComposeBoxView: View {
                             .padding(48)
                     }
                     .overlay(alignment: .topTrailing) {
-                        HoverCircleButton(diameter: 32) { uiState.previewImage = nil }
-                            .padding(16)
+                        HoverCircleButton(diameter: 32) {
+                            uiState.previewImage = nil
+                            focusToken += 1
+                        }
+                        .padding(16)
                     }
                 }
             }
@@ -686,6 +715,7 @@ struct TerminalComposeBoxView: View {
     }
 
     private func send(submit: Bool) {
+        composeDebugLog("send(submit: \(submit)) images=\(attachments.count) textEmpty=\(text.isEmpty)")
         guard let surface = surfaceView.surfaceModel else { return }
         // Expand collapsed-paste placeholders back to their full text.
         var content = text
@@ -736,6 +766,7 @@ struct TerminalComposeBoxView: View {
                 surface.sendText(content)
             }
             if submit {
+                composeDebugLog("send: synthetic submit Enter")
                 surface.sendKeyEvent(.init(key: .enter, action: .press))
                 surface.sendKeyEvent(.init(key: .enter, action: .release))
             }
@@ -965,6 +996,12 @@ private class ComposeNSTextView: NSTextView {
         // Non-command insert combos (e.g. opt+enter) arrive here rather
         // than through the key-equivalent path.
         let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        if event.keyCode == 0x24 || event.keyCode == 0x4C {
+            composeDebugLog("editor keyDown Enter mods=\(mods.rawValue)")
+        }
+        if event.keyCode == 0x33 {
+            composeDebugLog("editor keyDown Delete mods=\(mods.rawValue)")
+        }
         if handleEnterCombo(event, mods: mods) { return }
 
         // "/" as the first character of an empty box hands off to the
