@@ -1154,6 +1154,12 @@ extension Ghostty {
             // On any keyDown event we unset our bell state
             bell = false
 
+            // TEMPORARY diagnostics for intermittent Enter/Cmd+Delete: if
+            // these land here, focus was on the terminal, not the editor.
+            if event.keyCode == 0x24 || event.keyCode == 0x4C || event.keyCode == 0x33 {
+                composeDebugLog("surface keyDown keyCode=\(event.keyCode) firstResponder=\(String(describing: type(of: window?.firstResponder)))")
+            }
+
             // Compose auto-popup one-shot bypass (fork): the Enter that
             // submits the directly-typed command re-arms auto-popup. The
             // Enter itself still reaches the terminal below.
