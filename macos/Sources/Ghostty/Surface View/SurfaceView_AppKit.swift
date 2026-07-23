@@ -679,6 +679,19 @@ extension Ghostty {
             // because there could be some other overlays on top, like search bar
             guard window.contentView?.hitTest(location) == self else { return event }
 
+            // Fork: our own hitTest above can't see sibling overlays
+            // (compose box, command palette) stacked over the surface in
+            // the hosting view, so also require the window-level hit test
+            // to resolve to us. Without this, the first click on overlay
+            // UI was consumed below as a "split focus transfer" click
+            // whenever the surface wasn't first responder (e.g. while the
+            // compose editor had focus).
+            if let deepest = window.contentView?.hitTest(event.locationInWindow),
+               deepest !== self,
+               !deepest.isDescendant(of: self) {
+                return event
+            }
+
             // We always assume that we're resetting our mouse suppression
             // unless we see the specific scenario below to set it.
             suppressNextLeftMouseUp = false
