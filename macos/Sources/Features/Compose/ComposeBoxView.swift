@@ -64,23 +64,6 @@ class ComposeDraftStore {
     }
 }
 
-/// TEMPORARY diagnostics for the intermittent Enter/Cmd+Delete reports:
-/// NSLog does not reach the unified log from this app, so append to /tmp.
-func composeDebugLog(_ message: String) {
-    let path = "/tmp/ghostty-compose-debug.log"
-    let formatter = DateFormatter()
-    formatter.dateFormat = "HH:mm:ss.SSS"
-    let line = "\(formatter.string(from: Date())) \(message)\n"
-    guard let data = line.data(using: .utf8) else { return }
-    if let handle = FileHandle(forWritingAtPath: path) {
-        handle.seekToEndOfFile()
-        handle.write(data)
-        handle.closeFile()
-    } else {
-        FileManager.default.createFile(atPath: path, contents: data)
-    }
-}
-
 /// Transient per-surface compose UI state (currently just the open image
 /// preview). This lives outside the view because TerminalView recreates
 /// the compose view off lastFocusedSurface: a click that shuffles window
@@ -715,7 +698,6 @@ struct TerminalComposeBoxView: View {
     }
 
     private func send(submit: Bool) {
-        composeDebugLog("send(submit: \(submit)) images=\(attachments.count) textEmpty=\(text.isEmpty)")
         guard let surface = surfaceView.surfaceModel else { return }
         // Expand collapsed-paste placeholders back to their full text.
         var content = text
@@ -760,13 +742,19 @@ struct TerminalComposeBoxView: View {
 
         // The core treats surface text input as a paste, so multi-line
         // content arrives as one bracketed-paste block and embedded newlines
-        // don't submit. Submission is a separate synthetic Enter.
+        // don't submit. Submission is a separate synthetic Enter, delayed by
+        // compose-submit-delay-ms: sent immediately (~7ms) after the paste,
+        // Claude Code sometimes drops it — confirmed via /tmp logging
+        // 2026-07-23, especially when sending while Claude Code is busy.
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
             if !content.isEmpty {
                 surface.sendText(content)
             }
-            if submit {
-                composeDebugLog("send: synthetic submit Enter")
+        }
+        if submit {
+            let submitDelay = Double((NSApp.delegate as? AppDelegate)?
+                .ghostty.config.composeSubmitDelayMs ?? 50) / 1000
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay + submitDelay) {
                 surface.sendKeyEvent(.init(key: .enter, action: .press))
                 surface.sendKeyEvent(.init(key: .enter, action: .release))
             }
@@ -996,12 +984,6 @@ private class ComposeNSTextView: NSTextView {
         // Non-command insert combos (e.g. opt+enter) arrive here rather
         // than through the key-equivalent path.
         let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
-        if event.keyCode == 0x24 || event.keyCode == 0x4C {
-            composeDebugLog("editor keyDown Enter mods=\(mods.rawValue)")
-        }
-        if event.keyCode == 0x33 {
-            composeDebugLog("editor keyDown Delete mods=\(mods.rawValue)")
-        }
         if handleEnterCombo(event, mods: mods) { return }
 
         // "/" as the first character of an empty box hands off to the
