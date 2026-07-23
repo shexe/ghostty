@@ -8,15 +8,17 @@ comes to rest between rows wherever you stop, with no snap back to a row
 boundary.
 
 It also adds **Option-click to move the cursor** in the prompt, with no shell
-integration required, and makes **⌘-click open URLs that are hard-wrapped
-across lines** by programs such as tmux and Claude Code.
+integration required, makes **⌘-click open URLs that are hard-wrapped
+across lines** by programs such as tmux and Claude Code, and adds a
+**claude.ai-style compose box** for writing prompts to
+[Claude Code](https://claude.com/claude-code) natively.
 
 Built on Ghostty **v1.3.1**. This is an unofficial personal fork and is not
 affiliated with the Ghostty project.
 
 > **The fork lives on the [`pixel-scroll`](../../tree/pixel-scroll) branch.**
 > The [**full diff against v1.3.1**](../../compare/v1.3.1...pixel-scroll) shows
-> everything it changes, about 900 lines across 16 files.
+> everything it changes, about 2,500 lines across 33 files.
 
 ## What it does
 
@@ -37,7 +39,32 @@ affiliated with the Ghostty project.
   stock Ghostty treats as the end of the line. Link matching joins neighboring
   full-width rows, so the whole URL highlights and opens.
 
-## How it works
+## Compose box (for Claude Code)
+
+A native prompt panel docked to the bottom of the terminal (⌘+;), styled
+after claude.ai, for writing Claude Code prompts with real macOS text
+editing — mouse selection, multi-line editing, per-tab drafts that
+survive closing the panel. Text is delivered to the terminal as one
+bracketed paste; Enter submits, ⌘/⇧/⌃+Enter insert newlines (all
+rebindable via `compose-*` config options).
+
+- **Auto-popup**: plain typing or pasting in a Claude Code tab (detected
+  by title heuristic) opens the box seeded with what you typed.
+  Toggleable per tab (⌘⇧+;), with a one-shot bypass (⌘⇧+I) for typing a
+  single command straight into the terminal.
+- **Slash commands stay native**: typing `/` hands off to Claude Code's
+  own slash-command menu in the terminal, and the box stays out of the
+  way until the command is sent, cancelled, or deleted — including the
+  single-key answers to dialogs like `/model`.
+- **Images**: pasted images attach as thumbnails, delivered on send the
+  way Claude Code ingests them (clipboard + Ctrl+V). Thumbnails behave
+  like claude.ai's: hover shows a remove button, click opens a
+  full-size preview overlay.
+- **Large pastes collapse** to `[Pasted text #N +K lines]` placeholders,
+  expanded back at send time, mirroring Claude Code's own behavior.
+- Master switch: `compose-enabled` config option.
+
+## How the scrolling works
 
 macOS trackpad events already carry precise pixel deltas. Stock Ghostty
 accumulates them into whole-cell steps and discards the remainder. The patch
