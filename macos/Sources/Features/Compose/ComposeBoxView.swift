@@ -64,6 +64,27 @@ class ComposeDraftStore {
     }
 }
 
+/// Transient per-surface compose UI state (currently just the open image
+/// preview). This lives outside the view because TerminalView recreates
+/// the compose view off lastFocusedSurface: a click that shuffles window
+/// focus can tear the view down and rebuild it mid-interaction, wiping
+/// any @State. Draft text/images already survive that via
+/// ComposeDraftStore; this is the same pattern for non-draft UI state.
+class ComposeUIState: ObservableObject {
+    @Published var previewImage: NSImage?
+
+    private static let states = NSMapTable<Ghostty.SurfaceView, ComposeUIState>(
+        keyOptions: .weakMemory,
+        valueOptions: .strongMemory)
+
+    static func state(for surface: Ghostty.SurfaceView) -> ComposeUIState {
+        if let existing = states.object(forKey: surface) { return existing }
+        let state = ComposeUIState()
+        states.setObject(state, forKey: surface)
+        return state
+    }
+}
+
 extension Notification.Name {
     /// Key in ghosttyComposeAutoPopup userInfo carrying the keystroke text
     /// that triggered the popup, so it seeds the draft.
@@ -300,6 +321,113 @@ class ComposeAutoPopupStore {
     }
 }
 
+/// Runs `action` on mouse-down over its area, via a real AppKit view.
+/// SwiftUI Button/onTapGesture inside this hosted hierarchy swallow the
+/// first click (they only start responding after an interaction has
+/// "warmed up" the hosting view); an NSView's mouseDown always fires,
+/// exactly like the terminal and text views that never had the problem.
+private struct ClickCatcher: NSViewRepresentable {
+    let action: () -> Void
+
+    func makeNSView(context: Context) -> CatcherView {
+        let view = CatcherView()
+        view.action = action
+        return view
+    }
+
+    func updateNSView(_ view: CatcherView, context: Context) {
+        view.action = action
+    }
+
+    class CatcherView: NSView {
+        var action: () -> Void = {}
+
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+        override func mouseDown(with event: NSEvent) {
+            action()
+        }
+    }
+}
+
+/// A circular "x" button, claude.ai-style: white circle with a hairline
+/// border that darkens while the pointer is over it. Used for removing
+/// attachments and closing the image preview. Deliberately no .help
+/// tooltip.
+private struct HoverCircleButton: View {
+    var diameter: CGFloat = 22
+    let action: () -> Void
+    var onHoverChange: ((Bool) -> Void)? = nil
+
+    @State private var hovering = false
+
+    var body: some View {
+        Image(systemName: "xmark")
+            .font(.system(size: diameter * 0.45, weight: .semibold))
+            .foregroundStyle(.secondary)
+            .frame(width: diameter, height: diameter)
+            .background(
+                Circle().fill(Color(nsColor: .textBackgroundColor)))
+            .overlay(
+                Circle().fill(Color.primary.opacity(hovering ? 0.12 : 0)))
+            .overlay(
+                Circle().strokeBorder(.separator, lineWidth: 1))
+            .shadow(color: .black.opacity(0.15), radius: 1.5, y: 0.5)
+            // The click region is the full frame — the same region
+            // .onHover responds to — so clickable and gray-highlight
+            // areas match exactly.
+            .overlay(ClickCatcher(action: action))
+            // The pointer-style system is what governs the cursor here
+            // (the terminal surface uses it too); NSCursor.push/cursor
+            // rects lose to it.
+            .backport.pointerStyle(.link)
+            .onHover { inside in
+                hovering = inside
+                onHoverChange?(inside)
+            }
+    }
+}
+
+/// An attached image in the compose box, claude.ai-style: the remove
+/// button only appears while hovering the thumbnail (pointing-hand
+/// cursor), as a white circle overlapping the top-left corner that
+/// darkens when the pointer is over it. No tooltip.
+private struct AttachmentThumbnail: View {
+    let image: NSImage
+    let size: CGFloat
+    let onPreview: () -> Void
+    let onRemove: () -> Void
+
+    @State private var hoveringThumbnail = false
+    @State private var hoveringRemove = false
+
+    var body: some View {
+        Image(nsImage: image)
+            .resizable()
+            .aspectRatio(contentMode: .fill)
+            .frame(width: size, height: size)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .strokeBorder(.separator, lineWidth: 1))
+            .overlay(ClickCatcher(action: onPreview))
+            .backport.pointerStyle(.link)
+            .onHover { hoveringThumbnail = $0 }
+        .overlay(alignment: .topLeading) {
+            // The button hangs past the corner, so it keeps its own
+            // hover state: leaving the thumbnail's frame for the
+            // button must not hide it.
+            if hoveringThumbnail || hoveringRemove {
+                HoverCircleButton(
+                    action: onRemove,
+                    onHoverChange: { hoveringRemove = $0 })
+                    .offset(x: -8, y: -8)
+            }
+        }
+        .animation(.easeOut(duration: 0.1), value: hoveringThumbnail || hoveringRemove)
+    }
+}
+
 /// A claude.ai-style compose panel docked to the bottom of the terminal view.
 /// Text is edited with full native text view behavior (mouse, selection,
 /// multi-line) and delivered to the terminal as a paste, optionally followed
@@ -312,9 +440,19 @@ struct TerminalComposeBoxView: View {
     /// Set this to true to show the view.
     @Binding var isPresented: Bool
 
+    /// Per-surface UI state that must survive this view being torn down
+    /// and rebuilt (see ComposeUIState). Holds the open image preview.
+    @ObservedObject var uiState: ComposeUIState
+
     @State private var text: String = ""
     @State private var attachments: [NSImage] = []
     @State private var textHeight: CGFloat = 0
+
+    init(surfaceView: Ghostty.SurfaceView, isPresented: Binding<Bool>) {
+        self.surfaceView = surfaceView
+        self._isPresented = isPresented
+        self.uiState = ComposeUIState.state(for: surfaceView)
+    }
 
     /// Incremented to pull first-responder status back to the text view,
     /// e.g. when typing in the terminal is routed into an already-open box.
@@ -372,26 +510,14 @@ struct TerminalComposeBoxView: View {
                             if !attachments.isEmpty {
                                 HStack(spacing: 8) {
                                     ForEach(attachments.indices, id: \.self) { i in
-                                        Image(nsImage: attachments[i])
-                                            .resizable()
-                                            .aspectRatio(contentMode: .fill)
-                                            .frame(width: thumbnailSize, height: thumbnailSize)
-                                            .clipShape(RoundedRectangle(cornerRadius: 8))
-                                            .overlay(
-                                                RoundedRectangle(cornerRadius: 8)
-                                                    .strokeBorder(.separator, lineWidth: 1))
-                                            .overlay(alignment: .topTrailing) {
-                                                Button {
-                                                    attachments.remove(at: i)
-                                                    syncDraft()
-                                                } label: {
-                                                    Image(systemName: "xmark.circle.fill")
-                                                        .foregroundStyle(.secondary)
-                                                        .background(Circle().fill(.background))
-                                                }
-                                                .buttonStyle(.plain)
-                                                .padding(3)
-                                            }
+                                        AttachmentThumbnail(
+                                            image: attachments[i],
+                                            size: thumbnailSize,
+                                            onPreview: { uiState.previewImage = attachments[i] },
+                                            onRemove: {
+                                                attachments.remove(at: i)
+                                                syncDraft()
+                                            })
                                     }
                                     Spacer()
                                 }
@@ -403,7 +529,15 @@ struct TerminalComposeBoxView: View {
                                 font: font,
                                 focusToken: focusToken,
                                 onSend: send(submit:),
-                                onDismiss: { isPresented = false },
+                                onDismiss: {
+                                    // Esc closes the preview overlay first,
+                                    // then the panel.
+                                    if uiState.previewImage != nil {
+                                        uiState.previewImage = nil
+                                    } else {
+                                        isPresented = false
+                                    }
+                                },
                                 onPasteImage: { image in
                                     // Images can only be delivered to Claude
                                     // Code; refuse the attachment elsewhere.
@@ -440,12 +574,35 @@ struct TerminalComposeBoxView: View {
                     attachments = draft.images
                 }
                 .onChange(of: text) { _ in syncDraft() }
+
+                // Full-size preview of a clicked attachment, claude.ai-style:
+                // dimmed backdrop, image fit to the surface, circular close
+                // button. Backdrop click, the button, or Esc dismisses.
+                if let preview = uiState.previewImage {
+                    ZStack {
+                        Color.black.opacity(0.55)
+                            .overlay(ClickCatcher { uiState.previewImage = nil })
+                        Image(nsImage: preview)
+                            .resizable()
+                            .aspectRatio(contentMode: .fit)
+                            .clipShape(RoundedRectangle(cornerRadius: 10))
+                            // Absorb clicks on the image itself so only
+                            // the backdrop dismisses.
+                            .overlay(ClickCatcher {})
+                            .padding(48)
+                    }
+                    .overlay(alignment: .topTrailing) {
+                        HoverCircleButton(diameter: 32) { uiState.previewImage = nil }
+                            .padding(16)
+                    }
+                }
             }
         }
         .onChange(of: isPresented) { newValue in
             // When the panel disappears, return focus to the surface it was
             // overlaid on. Same pattern as the command palette.
             if !newValue {
+                uiState.previewImage = nil
                 DispatchQueue.main.async {
                     surfaceView.window?.makeFirstResponder(surfaceView)
                 }
