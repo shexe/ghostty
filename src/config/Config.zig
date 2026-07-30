@@ -1593,6 +1593,42 @@ title: ?[:0]const u8 = null,
 /// the Enter immediately. macOS only. (Fork addition.)
 @"compose-submit-delay-ms": u32 = 50,
 
+/// When the compose box opens, pull any text already typed at Claude
+/// Code's prompt into the box, so the same message doesn't end up split
+/// across the terminal and the compose box. The text is located by
+/// scraping the visible screen for Claude Code's input box; a plain shell
+/// prompt never matches, and nothing is removed from the terminal until
+/// the text is safely in the compose draft. macOS only. (Fork addition.)
+@"compose-adopt-prompt-text": bool = true,
+
+/// Fallback for removing the terminal's copy of adopted text
+/// (`compose-adopt-prompt-text`) once it is in the compose box.
+///
+/// This is only consulted when adoption cannot prove that Backspace is
+/// safe. When the terminal cursor shows the caret sitting at the end of a
+/// single-row input, adoption always backspaces the text away regardless
+/// of this setting: Backspace is never an interrupt, so it is strictly
+/// better than Ctrl+C there. The proof fails on a wrapped or multi-line
+/// prompt, or when the caret has been moved back into the text.
+///
+/// One of:
+///
+///   * `ctrl+c` - send Ctrl+C, which Claude Code treats as "clear the
+///     input" when the prompt has text in it. The default, but note that
+///     Ctrl+C is also Claude Code's interrupt: adopting while a turn is
+///     running will clear the input AND kill the turn.
+///
+///   * `backspace` - send one Backspace per adopted character. Never
+///     interrupts, but only correct when the cursor is at the end of the
+///     input.
+///
+///   * `none` - leave the terminal untouched, making adoption a copy
+///     rather than a move. Choose this to guarantee no keystroke is ever
+///     sent to the terminal.
+///
+/// macOS only. (Fork addition.)
+@"compose-adopt-prompt-clear": ?[:0]const u8 = null,
+
 /// The setting that will change the application class value.
 ///
 /// This controls the class field of the `WM_CLASS` X11 property (when running

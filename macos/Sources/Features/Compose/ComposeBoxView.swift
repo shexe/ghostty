@@ -73,6 +73,12 @@ class ComposeDraftStore {
 class ComposeUIState: ObservableObject {
     @Published var previewImage: NSImage?
 
+    /// True once this open of the box has adopted the terminal's prompt
+    /// text (see ComposePromptAdopter). Not @Published: it must not trigger
+    /// a re-render, and it only exists to keep a view rebuild while the box
+    /// is open from adopting a second time. Reset when the box closes.
+    var didAdoptPromptText: Bool = false
+
     private static let states = NSMapTable<Ghostty.SurfaceView, ComposeUIState>(
         keyOptions: .weakMemory,
         valueOptions: .strongMemory)
@@ -578,6 +584,7 @@ struct TerminalComposeBoxView: View {
                     let draft = ComposeDraftStore.shared.draft(for: surfaceView)
                     text = draft.text
                     attachments = draft.images
+                    adoptTerminalPromptText()
                 }
                 .onChange(of: text) { _ in syncDraft() }
 
@@ -615,6 +622,7 @@ struct TerminalComposeBoxView: View {
             // overlaid on. Same pattern as the command palette.
             if !newValue {
                 uiState.previewImage = nil
+                uiState.didAdoptPromptText = false
                 DispatchQueue.main.async {
                     surfaceView.window?.makeFirstResponder(surfaceView)
                 }
@@ -645,6 +653,24 @@ struct TerminalComposeBoxView: View {
     /// insert, or nil to paste inline.
     private func collapsePaste(_ string: String) -> String? {
         ComposeDraftStore.collapsedToken(for: string, surface: surfaceView)
+    }
+
+    /// On open, move anything already typed at Claude Code's prompt into
+    /// the box, so a message half-typed in the terminal and half in here
+    /// can't be sent in pieces. The draft is written before the terminal is
+    /// cleared: if the scrape is wrong, the worst case is text that stays
+    /// in both places, never text that's gone from both.
+    private func adoptTerminalPromptText() {
+        ComposePromptAdopter.note("box opened (adopted already: \(uiState.didAdoptPromptText))")
+        guard !uiState.didAdoptPromptText else { return }
+        uiState.didAdoptPromptText = true
+
+        guard let adoption = ComposePromptAdopter.adopt(from: surfaceView) else { return }
+        ComposePromptAdopter.note("adopting \(adoption.text.count) chars, clear=\(adoption.strategy)")
+        text = text.isEmpty ? adoption.text : text + "\n" + adoption.text
+        syncDraft()
+        ComposePromptAdopter.clearTerminalInput(adoption, surfaceView: surfaceView)
+        focusToken += 1
     }
 
     private func syncDraft() {
@@ -846,6 +872,11 @@ private struct ComposeTextView: NSViewRepresentable {
         }
         if textView.string != text {
             textView.string = text
+            // Clearing means the draft was sent or dismissed; its undo
+            // history shouldn't outlive it. Other programmatic replacements
+            // (paste collapse, draft restore) keep theirs so they stay
+            // undoable.
+            if text.isEmpty { textView.resetUndoHistory() }
             textView.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
             context.coordinator.updateHeight(for: textView)
         }
@@ -885,6 +916,25 @@ private class ComposeNSTextView: NSTextView {
     var onInterrupt: (() -> Void)?
     var onCollapsePaste: ((String) -> String?)?
     var onSlashPassthrough: (() -> Bool)?
+
+    /// The editor's own undo stack.
+    ///
+    /// Fork: `NSTextView.undoManager` is not the text view's own — NSResponder
+    /// walks the chain, which here lands on `BaseTerminalController.undoManager`,
+    /// Ghostty's `ExpiringUndoManager` for reopening closed tabs and windows.
+    /// Registering typing there shares a stack with window restoration and
+    /// expires edits after `undo-timeout`, so `allowsUndo` alone gets you
+    /// nothing. Own the manager so the draft's history is ours.
+    private let composeUndoManager = UndoManager()
+
+    override var undoManager: UndoManager? { composeUndoManager }
+
+    /// Drops the draft's undo history. Called when the box is cleared
+    /// programmatically (after a send), so Cmd+Z can't resurrect text that
+    /// was already delivered to the terminal.
+    func resetUndoHistory() {
+        composeUndoManager.removeAllActions()
+    }
 
     /// An image on the clipboard becomes an attachment, claude.ai-style;
     /// large text collapses to a "[Pasted text ...]" placeholder; anything
@@ -1032,20 +1082,91 @@ private class ComposeNSTextView: NSTextView {
             return true
         }
 
-        // Standard macOS text shortcuts that don't reliably reach the text
-        // system through the key-equivalent path in this hosting setup.
-        if event.keyCode == 0x33 {  // delete (backspace)
-            if mods == [.command] {
-                deleteToBeginningOfLine(nil)
-                return true
-            }
-            if mods == [.option] {
-                deleteWordBackward(nil)
-                return true
-            }
+        // Standard macOS text shortcuts. These all live in AppKit's
+        // StandardKeyBinding.dict, but command chords never reach our keyDown
+        // in this hosting setup, so we dispatch them ourselves. Only when we
+        // actually hold the keyboard: the box can be open while the terminal
+        // has focus (compose_bypass_once), and key equivalents are offered to
+        // every view in the hierarchy regardless of first responder.
+        if window?.firstResponder === self,
+           handleTextEditingShortcut(event, mods: mods) {
+            return true
         }
 
         return super.performKeyEquivalent(with: event)
+    }
+
+    /// Line/document navigation and deletion chords, dispatched by hand.
+    /// Option combos would reach the text system on their own; they're here
+    /// so the whole family lives in one place.
+    private func handleTextEditingShortcut(
+        _ event: NSEvent,
+        mods: NSEvent.ModifierFlags
+    ) -> Bool {
+        let cmd: NSEvent.ModifierFlags = [.command]
+        let cmdShift: NSEvent.ModifierFlags = [.command, .shift]
+
+        switch event.keyCode {
+        case 0x33:  // delete (backspace)
+            if mods == cmd { deleteToBeginningOfLine(nil); return true }
+            if mods == [.option] { deleteWordBackward(nil); return true }
+
+        case 0x06:  // z
+            // Ghostty binds cmd+z/cmd+shift+z to its own undo/redo (reopen a
+            // closed tab or window) and the Edit menu carries the same
+            // equivalents, so both are swallowed before the text system sees
+            // them. Claim them here and drive our own stack. Always returns
+            // true, including with nothing to undo: a no-op beats reopening a
+            // tab from under a draft.
+            if mods == cmd {
+                if composeUndoManager.canUndo {
+                    breakUndoCoalescing()
+                    composeUndoManager.undo()
+                }
+                return true
+            }
+            if mods == cmdShift {
+                if composeUndoManager.canRedo { composeUndoManager.redo() }
+                return true
+            }
+
+        case 0x08:  // c
+            // Ghostty binds cmd+c to copy_to_clipboard and Edit > Copy
+            // carries the same equivalent, so the chord is claimed before
+            // the text system ever sees it. The context menu's Copy goes
+            // straight to the text view, which is why right-click worked
+            // and the keystroke didn't. Same shape as the cmd+v case above.
+            if mods == cmd { copy(nil); return true }
+
+        case 0x07:  // x
+            // No Cut item in Ghostty's Edit menu, so nothing dispatches
+            // this to the text view either.
+            if mods == cmd { cut(nil); return true }
+
+        case 0x00:  // a
+            if mods == cmd { selectAll(nil); return true }
+
+        case 0x7B:  // left arrow
+            if mods == cmd { moveToLeftEndOfLine(nil); return true }
+            if mods == cmdShift { moveToLeftEndOfLineAndModifySelection(nil); return true }
+
+        case 0x7C:  // right arrow
+            if mods == cmd { moveToRightEndOfLine(nil); return true }
+            if mods == cmdShift { moveToRightEndOfLineAndModifySelection(nil); return true }
+
+        case 0x7E:  // up arrow
+            if mods == cmd { moveToBeginningOfDocument(nil); return true }
+            if mods == cmdShift { moveToBeginningOfDocumentAndModifySelection(nil); return true }
+
+        case 0x7D:  // down arrow
+            if mods == cmd { moveToEndOfDocument(nil); return true }
+            if mods == cmdShift { moveToEndOfDocumentAndModifySelection(nil); return true }
+
+        default:
+            break
+        }
+
+        return false
     }
 
     override func cancelOperation(_ sender: Any?) {
