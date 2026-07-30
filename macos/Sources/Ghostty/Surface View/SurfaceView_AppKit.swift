@@ -1174,7 +1174,15 @@ extension Ghostty {
             // Compose auto-popup one-shot bypass (fork): the Enter that
             // submits the directly-typed command re-arms auto-popup. The
             // Enter itself still reaches the terminal below.
+            //
+            // Only a bare Return submits. Shift+Enter (and the other
+            // newline chords) insert a line break in Claude Code, so
+            // re-arming on them ended the bypass in the middle of a
+            // multi-line message and the next keystroke popped the box
+            // back up. Erring the other way just leaves the bypass active
+            // slightly longer, which is the state the user asked for.
             if event.keyCode == 0x24,
+               event.modifierFlags.intersection([.command, .control, .option, .shift]).isEmpty,
                !hasMarkedText(),
                ComposeAutoPopupStore.shared.isBypassed(for: self) {
                 ComposeAutoPopupStore.shared.endBypass(for: self)

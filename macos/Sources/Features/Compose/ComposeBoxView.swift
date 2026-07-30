@@ -230,10 +230,20 @@ class ComposeAutoPopupStore {
         }
 
         let mods = event.modifierFlags.intersection([.command, .control, .option])
+        // Shift counts here: only a bare Return submits. Shift+Enter is a
+        // line break in Claude Code, and treating it as a submit ended the
+        // suppression mid-message.
+        let submitsOnEnter = event.modifierFlags
+            .intersection([.command, .control, .option, .shift]).isEmpty
 
         if state.inDialog {
             switch event.keyCode {
-            case 0x24, 0x4C, 0x35: // Enter / Esc dismiss the dialog
+            case 0x35: // Esc dismisses the dialog
+                endSlashCommand(for: surface)
+                return
+            // Each pattern needs its own `where`: in Swift the clause binds
+            // to the pattern it follows, not to the whole case list.
+            case 0x24 where submitsOnEnter, 0x4C where submitsOnEnter:
                 endSlashCommand(for: surface)
                 return
             case 0x08 where mods == [.control]: // Ctrl+C
@@ -253,7 +263,9 @@ class ComposeAutoPopupStore {
         }
 
         switch event.keyCode {
-        case 0x24, 0x4C: // Return / keypad Enter: submitted
+        case 0x24 where submitsOnEnter, 0x4C where submitsOnEnter:
+            // Return / keypad Enter: submitted. A modified Enter is a line
+            // break, so it falls through and leaves the state alone.
             if Self.commandOpensDialog(state.typed) {
                 state.inDialog = true
             } else {
