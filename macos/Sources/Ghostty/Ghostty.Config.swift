@@ -527,6 +527,23 @@ extension Ghostty {
             return v
         }
 
+        var composeAdoptPromptText: Bool {
+            guard let config = self.config else { return true }
+            var v = true
+            let key = "compose-adopt-prompt-text"
+            _ = ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8)))
+            return v
+        }
+
+        var composeAdoptPromptClear: String? {
+            guard let config = self.config else { return nil }
+            var v: UnsafePointer<Int8>?
+            let key = "compose-adopt-prompt-clear"
+            guard ghostty_config_get(config, &v, key, UInt(key.lengthOfBytes(using: .utf8))) else { return nil }
+            guard let ptr = v else { return nil }
+            return String(cString: ptr)
+        }
+
         var composeNewlineKey: String? {
             guard let config = self.config else { return nil }
             var v: UnsafePointer<Int8>?
