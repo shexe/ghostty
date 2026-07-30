@@ -678,6 +678,17 @@ struct TerminalComposeBoxView: View {
         uiState.didAdoptPromptText = true
 
         guard let adoption = ComposePromptAdopter.adopt(from: surfaceView) else { return }
+
+        // When the terminal's copy can't be cleared (compose-adopt-prompt-clear
+        // = none, or the caret wasn't provably at the end), the same text is
+        // still sitting at the prompt to be adopted again on the next open.
+        // Without this, closing and reopening the box stacks another copy
+        // into the draft every time.
+        guard !text.hasSuffix(adoption.text) else {
+            ComposePromptAdopter.note("skipping adopt: draft already ends with this text")
+            return
+        }
+
         ComposePromptAdopter.note("adopting \(adoption.text.count) chars, clear=\(adoption.strategy)")
         text = text.isEmpty ? adoption.text : text + "\n" + adoption.text
         syncDraft()
