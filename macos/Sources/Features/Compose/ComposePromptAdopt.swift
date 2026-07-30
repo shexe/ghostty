@@ -70,18 +70,87 @@ enum ComposePromptAdopter {
         debugLog(viewport: read.text, parsed: parsed?.text)
         guard let parsed, !parsed.text.isEmpty else { return nil }
 
-        let cursorColumn = cursorColumn(for: surfaceView, read: read)
-        let text = parsed.text + recoveredTrailingSpaces(
-            for: parsed, cursorColumn: cursorColumn)
+        let caret = caretAtEndOfInput(
+            parsed: parsed, read: read, surfaceView: surfaceView)
+        let text = parsed.text + String(repeating: " ", count: caret?.trailingSpaces ?? 0)
 
         let configured = ClearStrategy.parse(config?.composeAdoptPromptClear)
         let strategy = clearStrategy(
             configured: configured,
-            parsed: parsed,
-            adoptedLength: text.count,
-            cursorColumn: cursorColumn)
+            caretIsAtEnd: caret != nil,
+            adoptedLength: text.count)
 
         return Adoption(text: text, strategy: strategy)
+    }
+
+    /// The result of proving the caret sits at the end of Claude Code's input.
+    ///
+    /// Two things depend on this proof, and they're the same question asked
+    /// twice: how many trailing spaces the user typed (the gap between the
+    /// drawn text and the caret), and whether Backspace is a safe way to
+    /// clear the terminal (it deletes leftwards, so only from the end).
+    private struct CaretAtEnd {
+        let trailingSpaces: Int
+    }
+
+    /// Returns non-nil only when the caret is provably at the end of the
+    /// input. Every branch that can't establish that returns nil, because
+    /// both callers do something wrong if this is guessed: bogus spaces get
+    /// appended, or backspaces eat the wrong characters.
+    private static func caretAtEndOfInput(
+        parsed: ParseResult,
+        read: ViewportRead,
+        surfaceView: Ghostty.SurfaceView
+    ) -> CaretAtEnd? {
+        guard parsed.lastRowEndColumn >= 0 else { return nil }
+        guard let cursor = cursorPosition(for: surfaceView, read: read) else {
+            note("caret: no cursor position available")
+            return nil
+        }
+
+        // The caret must be at or past where the drawn text ends, and no
+        // further past it than a plausible run of trailing spaces.
+        let gap = cursor.column - parsed.lastRowEndColumn
+        guard gap >= 0, gap <= maxRecoveredTrailingSpaces else {
+            note("caret: column \(cursor.column) vs endCol \(parsed.lastRowEndColumn) (gap=\(gap)) — not at end")
+            return nil
+        }
+
+        // A single-row input needs no row check: the caret is inside the
+        // input box, so on a one-row box it can only be on that row.
+        if parsed.rowCount == 1 {
+            note("caret: at end of single-row input, \(gap) trailing space(s)")
+            return CaretAtEnd(trailingSpaces: gap)
+        }
+
+        // Multi-row: the column alone proves nothing, because a caret parked
+        // on an earlier row can still report a column past the last row's
+        // end. The row has to match too, which means treating emitted line N
+        // as viewport row N.
+        //
+        // That mapping survives the read dropping trailing blank lines (the
+        // formatter always trims those, so a full screen routinely yields
+        // one fewer line than there are rows) because dropping from the end
+        // doesn't move anything above it. It does NOT survive lines being
+        // joined mid-screen by soft-wrap unwrapping, which shifts everything
+        // below. A join can only pull the input's lines UP relative to their
+        // true rows, so the comparison below stops matching and this fails
+        // closed rather than clearing the wrong text.
+        guard let gridRows = gridRowCount(for: surfaceView) else {
+            note("caret: no grid size, can't verify row on multi-row input")
+            return nil
+        }
+        guard parsed.lineCount <= gridRows else {
+            note("caret: \(parsed.lineCount) lines exceeds \(gridRows) rows — mapping impossible")
+            return nil
+        }
+        guard cursor.row == parsed.lastRowIndex else {
+            note("caret: on row \(cursor.row), input ends on row \(parsed.lastRowIndex) — not at end")
+            return nil
+        }
+
+        note("caret: at end of \(parsed.rowCount)-row input, \(gap) trailing space(s)")
+        return CaretAtEnd(trailingSpaces: gap)
     }
 
     /// Picks how to clear the terminal's copy.
@@ -95,33 +164,31 @@ enum ComposePromptAdopter {
     /// backspace is used whenever the proof holds and the configured strategy
     /// is the fallback for when it doesn't.
     ///
-    /// The proof needs a single-row input: on a wrapped or multi-line draft a
-    /// caret parked on an earlier row can still report a column past the last
-    /// row's end, which would look like "at the end" when it isn't.
+    /// Backspace is used whenever the caret is provably at the end of the
+    /// input; the configured strategy is only the fallback for when that
+    /// proof fails.
     private static func clearStrategy(
         configured: ClearStrategy,
-        parsed: ParseResult,
-        adoptedLength: Int,
-        cursorColumn: Int?
+        caretIsAtEnd: Bool,
+        adoptedLength: Int
     ) -> ClearStrategy {
-        // Nothing to improve on: these never interrupt in the first place.
-        guard configured != .backspace, configured != .none else { return configured }
+        // Already backspacing: nothing to decide.
+        guard configured != .backspace else { return configured }
+        // `none` is deliberately NOT short-circuited here. It means "send
+        // nothing when Backspace can't be proven safe" — it is the fallback,
+        // not a veto. Treating it as a veto disabled the proof path entirely
+        // for anyone who took the advice to set it.
 
-        guard parsed.rowCount == 1, parsed.lastRowEndColumn >= 0 else {
-            note("clear: multi-row input, using configured \(configured)")
+        guard caretIsAtEnd else {
+            note("clear: caret not provably at end, using configured \(configured)")
             return configured
         }
-        guard let cursorColumn else {
-            note("clear: no cursor column, using configured \(configured)")
-            return configured
-        }
 
-        // The caret must be at or past the end of the drawn text, and no
-        // further past it than the trailing spaces we accounted for —
-        // otherwise the backspace count wouldn't match what's really there.
-        let gap = cursorColumn - parsed.lastRowEndColumn
-        guard gap >= 0, gap <= maxRecoveredTrailingSpaces else {
-            note("clear: caret not provably at end (gap=\(gap)), using configured \(configured)")
+        // A very long draft would mean thousands of synthetic key events.
+        // Falling back is the lesser evil; with `none` configured that just
+        // leaves the text for the user to clear.
+        guard adoptedLength <= maxBackspaces else {
+            note("clear: \(adoptedLength) chars exceeds backspace cap, using configured \(configured)")
             return configured
         }
 
@@ -129,51 +196,27 @@ enum ComposePromptAdopter {
         return .backspace
     }
 
-    /// Trailing spaces the user typed are NOT on the screen to be scraped.
-    /// Ghostty reads with trim=false, so a written space would survive — but
-    /// Claude Code never writes those cells (formatter.zig treats a cell with
-    /// no text as blank regardless of trim), so they come back as nothing.
-    ///
-    /// The one place they still exist is the cursor: imePoint() is computed
-    /// straight off `terminal.screens.active.cursor`, so the gap between the
-    /// end of the drawn text and the cursor column IS the trailing whitespace.
-    ///
-    /// Returns "" whenever the geometry isn't trustworthy — a missing cursor,
-    /// a cursor at or before the text (the user moved the caret, so there is
-    /// nothing to infer), or an implausibly large gap.
-    private static func recoveredTrailingSpaces(
-        for parsed: ParseResult,
-        cursorColumn: Int?
-    ) -> String {
-        guard parsed.lastRowEndColumn >= 0 else { return "" }
-        guard let cursorColumn else {
-            note("trailing: no cursor column available")
-            return ""
-        }
-
-        let gap = cursorColumn - parsed.lastRowEndColumn
-        note("trailing: endCol=\(parsed.lastRowEndColumn) cursorCol=\(cursorColumn) gap=\(gap)")
-
-        // An upper bound keeps a misread (wide glyphs count one character but
-        // two columns, a stale cursor) from pasting a wall of spaces.
-        guard gap > 0, gap <= maxRecoveredTrailingSpaces else { return "" }
-        return String(repeating: " ", count: gap)
-    }
-
     /// Maximum number of trailing spaces inferred from the cursor gap.
     private static let maxRecoveredTrailingSpaces = 32
 
-    /// The terminal cursor's column, derived from the IME point. That point
-    /// is `cursor.x * cellWidth + padding.left + cellWidth / 2`, unscaled;
-    /// the viewport read hands back `tl_px_x` for column 0 in the same space,
-    /// so subtracting it cancels the padding we can't otherwise see.
-    private static func cursorColumn(
+    /// Upper bound on synthetic Backspace presses used to clear the prompt.
+    private static let maxBackspaces = 1000
+
+    /// The terminal cursor's cell position, derived from the IME point.
+    ///
+    /// That point is `cursor.x * cellWidth + padding.left + cellWidth / 2`
+    /// horizontally and the BOTTOM of the cursor cell vertically, both
+    /// unscaled. The viewport read hands back the pixel origin of its
+    /// top-left cell in the same space, so subtracting it cancels the window
+    /// padding, which isn't queryable from Swift.
+    private static func cursorPosition(
         for surfaceView: Ghostty.SurfaceView,
         read: ViewportRead
-    ) -> Int? {
+    ) -> (column: Int, row: Int)? {
         guard let surface = surfaceView.surface else { return nil }
         let cellWidth = surfaceView.cellSize.width
-        guard cellWidth > 0 else { return nil }
+        let cellHeight = surfaceView.cellSize.height
+        guard cellWidth > 0, cellHeight > 0 else { return nil }
 
         var x: Double = 0
         var y: Double = 0
@@ -181,13 +224,33 @@ enum ComposePromptAdopter {
         var height: Double = 0
         ghostty_surface_ime_point(surface, &x, &y, &width, &height)
 
-        // Subtract the half-cell the IME point adds to reach the cell midpoint.
+        // Horizontally both points carry the same padding, and the IME point
+        // adds half a cell to reach the midpoint: the difference is
+        // `cursor.x + 0.5`.
         let column = (x - read.originX) / cellWidth - 0.5
+
+        // Vertically the two differ by more than padding. read_text's origin
+        // is a text BASELINE (`+ cellHeight - baseline`) while the IME point
+        // is the cell's BOTTOM (`+ cellHeight`), so the cell-height terms
+        // cancel and the difference is `cursor.y * cellHeight + baseline`.
+        // The baseline always falls inside the cell, so it is strictly less
+        // than one row and floor() drops it exactly — no need for the font
+        // metric itself, which isn't exposed here.
+        let rowFloat = (y - read.originY) / cellHeight
+        let row = rowFloat.rounded(.down)
         note(String(
-            format: "cursor: imeX=%.1f imeY=%.1f originX=%.1f cellW=%.2f -> col=%.2f",
-            x, y, read.originX, cellWidth, column))
+            format: "cursor: imeX=%.1f imeY=%.1f origin=(%.1f,%.1f) cell=%.2fx%.2f -> col=%.2f row=%.2f (raw %.2f)",
+            x, y, read.originX, read.originY, cellWidth, cellHeight, column, row, rowFloat))
         guard column.isFinite, column >= 0, column < 10_000 else { return nil }
-        return Int(column.rounded())
+        guard row.isFinite, row >= 0, row < 10_000 else { return nil }
+        return (Int(column.rounded()), Int(row))
+    }
+
+    /// Rows in the terminal grid, used to check that the viewport read gave
+    /// us exactly one line per row before trusting line indices as rows.
+    private static func gridRowCount(for surfaceView: Ghostty.SurfaceView) -> Int? {
+        guard let surface = surfaceView.surface else { return nil }
+        return Int(ghostty_surface_size(surface).rows)
     }
 
     /// Removes the adopted text from Claude Code's input. Only call this
@@ -293,9 +356,16 @@ enum ComposePromptAdopter {
     struct ParseResult {
         let text: String
         let lastRowEndColumn: Int
-        /// Screen rows the input occupies. Only a single-row input lets the
-        /// cursor column prove the caret is at the end of the text.
+        /// Screen rows the input occupies. A single-row input lets the cursor
+        /// column alone prove the caret is at the end; more rows need the
+        /// cursor's row as well.
         let rowCount: Int
+        /// Index of the input's last row within the viewport lines.
+        let lastRowIndex: Int
+        /// Total viewport lines the read produced. Equal to the terminal's
+        /// row count exactly when no line was joined or dropped, which is
+        /// what makes a line index usable as a row index.
+        let lineCount: Int
     }
 
     static func parse(_ viewport: String) -> String? {
@@ -371,7 +441,12 @@ enum ComposePromptAdopter {
         guard !isPlaceholder(result) else { return nil }
         // -1: this box pads its rows out to the border, so there's no honest
         // "where the text ends" column to hang trailing-space recovery on.
-        return ParseResult(text: result, lastRowEndColumn: -1, rowCount: rows.count)
+        return ParseResult(
+            text: result,
+            lastRowEndColumn: -1,
+            rowCount: rows.count,
+            lastRowIndex: promptIndex + rows.count - 1,
+            lineCount: lines.count)
     }
 
     /// Pulls the user's text out of the *rule-delimited* input Claude Code
@@ -456,10 +531,13 @@ enum ComposePromptAdopter {
 
         // This box starts at column 0 and isn't padded, so the last row's
         // length is exactly the column the drawn text ends at.
+        let lastRowIndex = rows[rows.count - 1]
         return ParseResult(
             text: result,
-            lastRowEndColumn: raw[rows[rows.count - 1]].count,
-            rowCount: rows.count)
+            lastRowEndColumn: raw[lastRowIndex].count,
+            rowCount: rows.count,
+            lastRowIndex: lastRowIndex,
+            lineCount: lines.count)
     }
 
     /// A row like `❯ text`, with no border. Also accepts `> ` so a version
