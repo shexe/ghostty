@@ -727,9 +727,26 @@ extension Ghostty {
 
             // Command keyUp events are never sent to the normal responder chain
             // so we send them here.
-            guard focused else { return event }
+            guard ownsKeyboard else { return event }
             self.keyUp(with: event)
             return nil
+        }
+
+        /// True when this surface actually owns the window's keyboard input.
+        ///
+        /// Fork: `focused` tracks the focused *surface*, not the responder
+        /// chain, and `syncFocusToSurfaceTree` re-asserts it whenever the
+        /// focused surface or window key state changes — including while an
+        /// overlay sibling (the compose box) holds first responder. Anything
+        /// that competes with an overlay for keys has to check the responder
+        /// as well, or the surface silently eats the overlay's input.
+        private var ownsKeyboard: Bool {
+            guard focused else { return false }
+
+            // A nil/non-view first responder (e.g. the window itself mid
+            // focus transfer) keeps the old behavior.
+            guard let responder = window?.firstResponder as? NSView else { return true }
+            return responder === self || responder.isDescendant(of: self)
         }
 
         // MARK: - Notifications
@@ -1407,7 +1424,17 @@ extension Ghostty {
             // Besides C-/, its important we don't process key equivalents if unfocused
             // because there are other event listeners for that (i.e. AppDelegate's
             // local event handler).
-            if !focused {
+            //
+            // Fork: this uses `ownsKeyboard` rather than `focused`. Key
+            // equivalents are offered to the entire view hierarchy and the
+            // surface comes before the compose box overlay, so while the
+            // compose editor has first responder we must not claim chords
+            // that Ghostty happens to bind. Concretely, cmd+backspace is a
+            // default binding (text "\x15"), so it was being swallowed here
+            // and sent to the terminal instead of deleting to the start of
+            // the line in the compose editor. Opt+backspace is unbound, which
+            // is why that one always worked.
+            if !ownsKeyboard {
                 return false
             }
 
