@@ -1605,11 +1605,16 @@ title: ?[:0]const u8 = null,
 /// (`compose-adopt-prompt-text`) once it is in the compose box.
 ///
 /// This is only consulted when adoption cannot prove that Backspace is
-/// safe. When the terminal cursor shows the caret sitting at the end of a
-/// single-row input, adoption always backspaces the text away regardless
-/// of this setting: Backspace is never an interrupt, so it is strictly
-/// better than Ctrl+C there. The proof fails on a wrapped or multi-line
-/// prompt, or when the caret has been moved back into the text.
+/// safe. When the terminal cursor shows the caret sitting at the end of
+/// the input, adoption always backspaces the text away regardless of this
+/// setting: Backspace is never an interrupt, so it is strictly better than
+/// Ctrl+C there. On a wrapped or multi-line prompt the cursor's row must
+/// match the input's last row too, which additionally requires the screen
+/// read to line up one-to-one with the terminal's rows.
+///
+/// The proof fails when the caret has been moved back into the text, when
+/// the draft is longer than 1000 characters, or when that row check can't
+/// be made.
 ///
 /// One of:
 ///
@@ -1623,8 +1628,9 @@ title: ?[:0]const u8 = null,
 ///     input.
 ///
 ///   * `none` - leave the terminal untouched, making adoption a copy
-///     rather than a move. Choose this to guarantee no keystroke is ever
-///     sent to the terminal.
+///     rather than a move. Note this is a fallback, not a veto: a
+///     provably-safe Backspace clear still happens. To send no keystroke
+///     under any circumstances, turn off `compose-adopt-prompt-text`.
 ///
 /// macOS only. (Fork addition.)
 @"compose-adopt-prompt-clear": ?[:0]const u8 = null,
