@@ -1,0 +1,32 @@
+#!/bin/sh
+# Reject staged changes that add a path on this machine or its hostname.
+#
+# Flags added lines containing a home directory path (/Users/<name>/ or
+# /home/<name>/), a personal ~/<dir>/ path, or this machine's .local hostname.
+# Placeholder names such as /Users/you/ are allowed. The offending value is
+# never printed, only the file it is in.
+
+set -eu
+
+host="$(scutil --get LocalHostName 2>/dev/null || hostname -s 2>/dev/null || echo '')"
+
+placeholders='example|you|yourname|user|username|name|foo|bar|someone|me'
+pattern='/Users/[A-Za-z0-9._-]+/|/home/[A-Za-z0-9._-]+/|~/[A-Za-z0-9][A-Za-z0-9._-]*/'
+[ -n "$host" ] && pattern="${pattern}|${host}[.]local"
+
+bad=""
+for file in $(git diff --cached --name-only --diff-filter=ACM); do
+    if git diff --cached --no-color -U0 -- "$file" |
+        grep -E '^\+' | grep -Ev '^\+\+\+' |
+        grep -E "$pattern" |
+        grep -Evq "/Users/(${placeholders})/|/home/(${placeholders})/"
+    then
+        bad="$bad $file"
+    fi
+done
+[ -z "$bad" ] && exit 0
+
+echo "pre-commit: these files add a local path or hostname:" >&2
+for f in $bad; do printf '  %s\n' "$f" >&2; done
+echo "pre-commit: use a portable form (\$HOME, an env var, or a placeholder)." >&2
+exit 1
