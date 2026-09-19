@@ -1,0 +1,33 @@
+#!/bin/sh
+# Guard: never push to the original Ghostty repos.
+#
+# This fork may only ever be pushed to shexe/ghostty. Any attempt
+# to push to the original (ghostty-org/ghostty, lemur1905/ghostty-pixel-scroll)
+# is refused, regardless of remote name or URL.
+#
+# $1 = remote name, $2 = remote URL
+set -eu
+
+remote_name="$1"
+remote_url="$2"
+allowed="github.com/shexe/ghostty"
+
+case "$remote_url" in
+    *"$allowed" | *"$allowed.git" | *github.com:shexe/ghostty.git)
+        ;;
+    *)
+        echo "pre-push: refusing to push to '$remote_name' ($remote_url)." >&2
+        echo "pre-push: this fork may only be pushed to $allowed." >&2
+        echo "pre-push: never push to the original Ghostty repositories." >&2
+        exit 1
+        ;;
+esac
+
+case "$remote_url" in
+    *ghostty-org/ghostty*|*lemur1905/ghostty*)
+        echo "pre-push: refusing to push to the original repository." >&2
+        exit 1
+        ;;
+esac
+
+exit 0
