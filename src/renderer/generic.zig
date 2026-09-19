@@ -149,6 +149,21 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         scrollbar: terminal.Scrollbar,
         scrollbar_dirty: bool,
 
+        /// Tracks whether the alternate screen was active on the last
+        /// frame. When this changes we notify the surface so it can apply
+        /// per-screen padding (full-bleed for full-screen TUIs).
+        last_screen_alt: bool = false,
+
+        /// While set, we keep re-sending the screen-changed notification for a
+        /// short grace period after a screen switch. The surface turns that
+        /// into a resize (which sends SIGWINCH). Full-screen programs that
+        /// install their signal handlers a little late otherwise miss the
+        /// single initial notification and keep rendering at the old, smaller
+        /// grid size -- leaving a blank strip on the right and bottom.
+        resend_screen_alt: bool = false,
+        resend_screen_start: ?std.Io.Timestamp = null,
+        resend_screen_last: ?std.Io.Timestamp = null,
+
         /// Tracks the last bottom-right pin of the screen to detect new output.
         /// When the final line changes (node or y differs), new content was added.
         /// Used for scroll-to-bottom on output feature.
@@ -731,6 +746,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .visible = true,
                 .scrollbar = .zero,
                 .scrollbar_dirty = false,
+                .last_screen_alt = false,
                 .last_bottom_node = null,
                 .last_bottom_y = 0,
                 .search_matches = null,
@@ -1372,6 +1388,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 extra_below_visible: bool,
                 extra_below2_visible: bool,
                 extra_above_visible: bool,
+                screen_alt: bool,
             };
 
             // Update all our data as tightly as possible within the mutex.
@@ -1552,6 +1569,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .extra_below_visible = extras_visible and overscan.below >= 1,
                     .extra_below2_visible = extras_visible and overscan.below >= 2,
                     .extra_above_visible = extras_visible and overscan.above >= 1,
+                    .screen_alt = state.terminal.screens.active_key == .alternate,
                 };
             };
 
@@ -1559,6 +1577,45 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // within it. This must be done before anything reads the
             // render state (e.g. rebuildCells).
             self.terminal_state.endUpdate();
+
+            // If the active screen changed, notify the surface. It will
+            // reapply padding (full-bleed on the alternate screen) and
+            // relayout. Because the switch also changes the grid size, and
+            // some full-screen programs only install their SIGWINCH handler
+            // a moment after startup, we keep re-asserting the notification
+            // for a short grace period. Re-asserting the same size is
+            // harmless for programs that already handled it.
+            const now: std.Io.Timestamp = .now(global.io(), .awake);
+            if (critical.screen_alt != self.last_screen_alt) {
+                self.last_screen_alt = critical.screen_alt;
+                self.resend_screen_alt = critical.screen_alt;
+                self.resend_screen_start = now;
+                _ = self.surface_mailbox.push(.{
+                    .screen_changed = critical.screen_alt,
+                }, .forever);
+            } else if (self.resend_screen_start) |start| {
+                // Only re-assert while a full-screen program is active; the
+                // shell re-reads its size on its own and doesn't need the
+                // extra signals (which would make it redraw its prompt).
+                if (!self.resend_screen_alt or start.durationTo(now).toMilliseconds() > 2000) {
+                    // Grace period over.
+                    self.resend_screen_start = null;
+                    self.resend_screen_last = null;
+                } else {
+                    // Throttle to at most one re-assert every 150ms so we
+                    // don't spam SIGWINCH every rendered frame.
+                    const due = if (self.resend_screen_last) |last|
+                        last.durationTo(now).toMilliseconds() > 150
+                    else
+                        true;
+                    if (due) {
+                        self.resend_screen_last = now;
+                        _ = self.surface_mailbox.push(.{
+                            .screen_changed = self.resend_screen_alt,
+                        }, .forever);
+                    }
+                }
+            }
 
             // Outside the critical area we can update our links to contain
             // our regex results.
