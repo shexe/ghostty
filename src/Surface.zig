@@ -95,6 +95,12 @@ renderer: Renderer,
 /// The render state
 renderer_state: rendererpkg.State,
 
+/// Whether the terminal's alternate screen is currently active. Kept in
+/// sync by the renderer thread, which notifies us via `.screen_changed`.
+/// When true we drop all padding so full-screen TUIs (including graphics)
+/// are drawn edge-to-edge.
+screen_is_alt: bool = false,
+
 /// The renderer thread manager
 renderer_thread: rendererpkg.Thread,
 
@@ -1126,6 +1132,19 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
         .present_surface => try self.presentSurface(),
 
         .password_input => |v| try self.passwordInput(v),
+
+        .screen_changed => |alt| {
+            // Note: we intentionally do NOT shortcut when the value is
+            // unchanged. The renderer re-sends this for a short grace period
+            // after a switch so that full-screen programs which install their
+            // SIGWINCH handler slightly late still receive a resize.
+            self.screen_is_alt = alt;
+            self.applyPadding();
+            // Re-assert the size unchanged. The termio layer sends SIGWINCH
+            // explicitly, so this notifies late-initializing programs without
+            // mutating the grid (which previously caused horizontal jitter).
+            try self.resize(self.size.screen);
+        },
 
         .ring_bell => bell: {
             const now: std.Io.Timestamp = .now(global.io(), .awake);
@@ -2473,7 +2492,7 @@ fn setSelectionAndCopy(self: *Surface, sel: terminal.Selection) !void {
 fn setCellSize(self: *Surface, size: rendererpkg.CellSize) !void {
     // Update our cell size within our size struct
     self.size.cell = size;
-    self.balancePaddingIfNeeded();
+    self.applyPadding();
 
     // Notify the terminal
     self.queueIo(.{ .resize = self.size }, .unlocked);
@@ -2581,7 +2600,7 @@ pub fn sizeCallback(self: *Surface, size: apprt.SurfaceSize) !void {
 fn resize(self: *Surface, size: rendererpkg.ScreenSize) !void {
     // Save our screen size
     self.size.screen = size;
-    self.balancePaddingIfNeeded();
+    self.applyPadding();
 
     // Recalculate our grid size. Because Ghostty supports fluid resizing,
     // its possible the grid doesn't change at all even if the screen size changes.
@@ -2611,13 +2630,43 @@ fn resize(self: *Surface, size: rendererpkg.ScreenSize) !void {
     };
 }
 
-/// Recalculate the balanced padding if needed.
-fn balancePaddingIfNeeded(self: *Surface) void {
-    if (self.config.window_padding_balance == .false) return;
-    const content_scale = try self.rt_surface.getContentScale();
+/// Apply the padding appropriate for the currently active screen.
+///
+/// The alternate screen (used by full-screen TUIs such as editors, pagers,
+/// and graphics programs) is always full-bleed: padding is dropped so these
+/// programs can use the entire surface. The primary screen (the shell and
+/// scrollback) uses the configured padding.
+fn applyPadding(self: *Surface) void {
+    const balance = self.config.window_padding_balance;
+    if (self.screen_is_alt) {
+        // Full-bleed: drop the configured padding so the grid fills the
+        // surface. The viewport is rarely an exact multiple of the cell
+        // size, so a sub-cell remainder is left on the right/bottom. When
+        // padding balancing is on we spread that remainder around all four
+        // edges instead, which lets window-padding-color = extend-always
+        // paint it with the nearest cell colours (no visible strip).
+        if (balance != .false) {
+            self.size.balancePadding(.{}, balance);
+        } else {
+            self.size.padding = .{};
+        }
+        return;
+    }
+
+    // The content scale can fail; in that case fall back to no padding
+    // rather than risk stale padding from the alternate screen.
+    const content_scale = self.rt_surface.getContentScale() catch {
+        self.size.padding = .{};
+        return;
+    };
     const x_dpi = content_scale.x * font.face.default_dpi;
     const y_dpi = content_scale.y * font.face.default_dpi;
-    self.size.balancePadding(self.config.scaledPadding(x_dpi, y_dpi), self.config.window_padding_balance);
+    const explicit = self.config.scaledPadding(x_dpi, y_dpi);
+    if (balance != .false) {
+        self.size.balancePadding(explicit, balance);
+    } else {
+        self.size.padding = explicit;
+    }
 }
 
 /// Called to set the preedit state for character input. Preedit is used
@@ -3767,11 +3816,9 @@ pub fn contentScaleCallback(self: *Surface, content_scale: apprt.ContentScale) !
 
     try self.setFontSize(size);
 
-    // Update our padding which is dependent on DPI. We only do this for
-    // unbalanced padding since balanced padding is not dependent on DPI.
-    if (self.config.window_padding_balance == .false) {
-        self.size.padding = self.config.scaledPadding(x_dpi, y_dpi);
-    }
+    // Recompute padding for the active screen. Padding is DPI-dependent and
+    // is dropped entirely on the alternate screen.
+    self.applyPadding();
 
     // Force a resize event because the change in padding will affect
     // pixel-level changes to the renderer and viewport.
