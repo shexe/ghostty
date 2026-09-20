@@ -501,15 +501,15 @@ pub fn resize(
     self.size = size;
     const grid_size = size.grid();
 
-    // Update the size of our pty.
-    try self.backend.resize(grid_size, size.terminal());
-
     // Enter the critical area that we want to keep small
     {
         self.renderer_state.mutex.lockUncancelable(global.io());
         defer self.renderer_state.mutex.unlock(global.io());
 
-        // Update the size of our terminal state
+        // Update the size of our terminal state. Resizing ends synchronized
+        // output; turn it back on so the program's next frame at the new size
+        // lands whole. Its timeout still prevents a frozen terminal.
+        const synchronized = self.terminal.modes.get(.synchronized_output);
         try self.terminal.resize(
             self.alloc,
             .{
@@ -521,6 +521,11 @@ pub fn resize(
                 },
             },
         );
+        if (synchronized) self.terminal.modes.set(.synchronized_output, true);
+
+        // Resize the PTY under the lock, so a fast SIGWINCH response is never
+        // parsed into the old grid.
+        try self.backend.resize(grid_size, size.terminal());
 
         // If we have size reporting enabled we need to send a report.
         if (self.terminal.modes.get(.in_band_size_reports)) {
@@ -682,9 +687,6 @@ pub fn processOutput(self: *Termio, buf: []const u8) void {
 
 /// Process output from readdata but the lock is already held.
 fn processOutputLocked(self: *Termio, buf: []const u8) void {
-    // Schedule a render. We can call this first because we have the lock.
-    self.terminal_stream.handler.queueRender() catch unreachable;
-
     // Whenever a character is typed, we ensure the cursor is in the
     // non-blink state so it is rendered if visible. If we're under
     // HEAVY read load, we don't want to send a ton of these so we
@@ -721,6 +723,12 @@ fn processOutputLocked(self: *Termio, buf: []const u8) void {
         }
     } else {
         self.terminal_stream.nextSlice(buf);
+    }
+
+    // Don't render intermediate states of a synchronized frame. Its end is
+    // parsed in this same critical section, so it still renders immediately.
+    if (!self.terminal.modes.get(.synchronized_output)) {
+        self.terminal_stream.handler.queueRender() catch unreachable;
     }
 
     // If our stream handling caused messages to be sent to the mailbox
