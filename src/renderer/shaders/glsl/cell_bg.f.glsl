@@ -40,7 +40,9 @@ vec4 cell_bg() {
     // grid_size.y and grid_size.y + 1 (natural positions) and the row
     // above at grid_size.y + 2.
     if (grid_pos.y < 0) {
-        if (grid_pos.y == -1 && (grid_extra_rows & EXTRA_ABOVE) != 0) {
+        if (grid_pos.y == -1 &&
+            (grid_extra_rows & EXTRA_ABOVE) != 0 &&
+            gl_FragCoord.y >= grid_padding.x) {
             grid_pos.y = int(grid_size.y) + 2;
         } else if ((padding_extend & EXTEND_UP) != 0) {
             grid_pos.y = 0;
