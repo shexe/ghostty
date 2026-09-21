@@ -100,6 +100,12 @@ flags: packed struct {
     focused: bool = true,
 } = .{},
 
+/// A resize needs one draw after CPU cells are prepared.
+pending_resize_draw: bool = false,
+
+/// True during a live resize, when every prepared frame is drawn at once.
+live_resizing: bool = false,
+
 pub const DerivedConfig = struct {
     scrollback_compression: bool,
 
@@ -395,13 +401,18 @@ fn drainMailbox(self: *Thread) !void {
             },
 
             .font_grid => |grid| {
-                self.renderer.setFontGrid(grid.grid);
+                self.renderer.setFontGrid(grid.grid, grid.revision);
                 grid.set.deref(grid.old_key);
             },
 
             .presentation_health => |v| self.renderer.setPresentationHealth(v),
 
-            .resize => |v| self.renderer.setScreenSize(v),
+            .resize => |v| {
+                self.renderer.setScreenSize(v);
+                self.pending_resize_draw = true;
+            },
+
+            .live_resizing => |v| self.live_resizing = v,
 
             .change_config => |config| {
                 defer config.alloc.destroy(config.thread);
@@ -570,14 +581,21 @@ fn renderCallback(
     if (!t.flags.visible) return .disarm;
 
     // Update our frame data
-    t.renderer.updateFrame(
+    const prepared = t.renderer.updateFrame(
         t.state,
         t.flags.cursor_blink_visible,
-    ) catch |err|
+    ) catch |err| blk: {
         log.warn("error rendering err={}", .{err});
+        break :blk false;
+    };
+
+    // Draw a newly prepared frame right away after a resize, and throughout a
+    // live resize so the picture keeps up with the window.
+    const force = prepared and (t.pending_resize_draw or t.live_resizing);
+    if (prepared and t.pending_resize_draw) t.pending_resize_draw = false;
 
     // Draw
-    t.drawFrame(false);
+    t.drawFrame(force);
 
     // Schedule the next animation wake, if the renderer needs one.
     t.armAnimationTimer();
