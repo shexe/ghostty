@@ -1147,6 +1147,13 @@ pub const Surface = struct {
         };
     }
 
+    pub fn liveResizeCallback(self: *Surface, resizing: bool) void {
+        self.core_surface.liveResizeCallback(resizing) catch |err| {
+            log.err("error in live resize callback err={}", .{err});
+            return;
+        };
+    }
+
     fn queueInspectorRender(self: *Surface) void {
         _ = self.app.performAction(
             .{ .surface = &self.core_surface },
@@ -1702,9 +1709,11 @@ pub const CAPI = struct {
 
     export fn ghostty_app_free(v: *App) void {
         const core_app = v.core_app;
+        // Surface teardown drains GPU completions, which can still wake this
+        // runtime, so destroy the core app first.
+        core_app.destroy();
         v.terminate();
         global.alloc().destroy(v);
-        core_app.destroy();
     }
 
     /// Update the focused state of the app.
@@ -2006,6 +2015,11 @@ pub const CAPI = struct {
     /// Update the occlusion state of a surface.
     export fn ghostty_surface_set_occlusion(surface: *Surface, visible: bool) void {
         surface.occlusionCallback(visible);
+    }
+
+    /// Update whether the native surface is in an interactive resize.
+    export fn ghostty_surface_set_live_resizing(surface: *Surface, resizing: bool) void {
+        surface.liveResizeCallback(resizing);
     }
 
     /// Filter the mods if necessary. This handles settings such as
