@@ -130,8 +130,9 @@ pub fn init(
 }
 
 pub fn deinit(self: *App) void {
-    // Clean up all our surfaces
-    for (self.surfaces.items) |surface| surface.deinit();
+    // Pop each surface first: embedded surface teardown removes itself from
+    // the list, which would break iteration over it.
+    while (self.surfaces.pop()) |surface| surface.deinit();
     self.surfaces.deinit(self.alloc);
 
     // Clean up our font group cache
@@ -156,6 +157,19 @@ pub fn destroy(self: *App) void {
 pub fn tick(self: *App, rt_app: *apprt.App) !void {
     // Drain our mailbox
     try self.drainMailbox(rt_app);
+
+    // A health callback may add or remove surfaces, so deliver one transition
+    // at a time and rescan the list after each.
+    while (true) {
+        var delivered = false;
+        for (self.surfaces.items) |surface| {
+            if (surface.core().pollRendererHealth()) {
+                delivered = true;
+                break;
+            }
+        }
+        if (!delivered) break;
+    }
 }
 
 /// Update the configuration associated with the app. This can only be
