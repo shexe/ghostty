@@ -45,6 +45,28 @@ const DisplayLink = switch (builtin.os.tag) {
 
 const log = std.log.scoped(.generic_renderer);
 
+/// Apply scroll metadata only as part of a successful cell rebuild.
+fn rebuildWithScrollState(
+    uniforms: anytype,
+    grid_offset_y: f32,
+    extra_below: bool,
+    extra_below2: bool,
+    extra_above: bool,
+    operation: anytype,
+) Allocator.Error!void {
+    const previous = uniforms.*;
+    uniforms.grid_offset_y = grid_offset_y;
+    uniforms.grid_extra_rows = .{
+        .below = extra_below,
+        .below2 = extra_below2,
+        .above = extra_above,
+    };
+    operation.run() catch |err| {
+        uniforms.* = previous;
+        return err;
+    };
+}
+
 /// Create a renderer type with the provided graphics API wrapper.
 ///
 /// The graphics API wrapper must provide the interface outlined below.
@@ -1647,22 +1669,36 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // rebuilding cells, since the rebuild uses them to decide
                 // whether the extra rows beyond the viewport edges need
                 // to be built.
-                self.uniforms.grid_offset_y = @floatCast(critical.scroll_offset);
-                self.uniforms.grid_extra_rows = .{
-                    .below = critical.extra_below_visible,
-                    .below2 = critical.extra_below2_visible,
-                    .above = critical.extra_above_visible,
-                };
+                const Rebuild = struct {
+                    renderer_self: *Self,
+                    preedit: ?renderer.State.Preedit,
+                    cursor_style: ?renderer.CursorStyle,
+                    links: *const terminal.RenderState.CellSet,
 
-                // Build our GPU cells
-                self.rebuildCells(
-                    critical.preedit,
-                    renderer.cursorStyle(&self.terminal_state, .{
-                        .preedit = critical.preedit != null,
-                        .focused = self.focused,
-                        .blink_visible = cursor_blink_visible,
-                    }),
-                    &critical.links,
+                    fn run(operation: @This()) Allocator.Error!void {
+                        try operation.renderer_self.rebuildCells(
+                            operation.preedit,
+                            operation.cursor_style,
+                            operation.links,
+                        );
+                    }
+                };
+                rebuildWithScrollState(
+                    &self.uniforms,
+                    @floatCast(critical.scroll_offset),
+                    critical.extra_below_visible,
+                    critical.extra_below2_visible,
+                    critical.extra_above_visible,
+                    Rebuild{
+                        .renderer_self = self,
+                        .preedit = critical.preedit,
+                        .cursor_style = renderer.cursorStyle(&self.terminal_state, .{
+                            .preedit = critical.preedit != null,
+                            .focused = self.focused,
+                            .blink_visible = cursor_blink_visible,
+                        }),
+                        .links = &critical.links,
+                    },
                 ) catch |err| {
                     // This means we weren't able to allocate our buffer
                     // to update the cells. In this case, we continue with
