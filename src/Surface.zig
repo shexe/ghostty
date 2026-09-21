@@ -26,6 +26,7 @@ const simd = @import("simd/main.zig");
 const crash = @import("crash/main.zig");
 const unicode = @import("unicode/main.zig");
 const rendererpkg = @import("renderer.zig");
+const renderer_size = @import("renderer/size.zig");
 const termio = @import("termio.zig");
 const font = @import("font/main.zig");
 const Command = @import("Command.zig");
@@ -82,6 +83,10 @@ rt_surface: *apprt.runtime.Surface,
 font_grid_key: font.SharedGridSet.Key,
 font_size: font.face.DesiredSize,
 font_metrics: font.Metrics,
+font_revision: u64 = 0,
+
+/// Current host padding policy and the scale at which it was calculated.
+padding_policy: renderer_size.PaddingPolicy,
 
 /// This keeps track of if the font size was ever modified. If it wasn't,
 /// then config reloading will change the font. If it was manually adjusted,
@@ -537,6 +542,13 @@ pub fn init(
     );
 
     // Build our size struct which has all the sizes we need.
+    const padding_policy: renderer_size.PaddingPolicy = .{
+        .explicit_padding_px = derived_config.scaledPadding(x_dpi, y_dpi),
+        .balance = derived_config.window_padding_balance,
+        .screen_alt = false,
+        .content_scale = content_scale,
+        .policy_available = true,
+    };
     const size: rendererpkg.Size = size: {
         var size: rendererpkg.Size = .{
             .screen = screen: {
@@ -551,15 +563,7 @@ pub fn init(
             .padding = .{},
         };
 
-        const explicit: rendererpkg.Padding = derived_config.scaledPadding(
-            x_dpi,
-            y_dpi,
-        );
-        if (derived_config.window_padding_balance != .false) {
-            size.balancePadding(explicit, derived_config.window_padding_balance);
-        } else {
-            size.padding = explicit;
-        }
+        padding_policy.apply(&size);
 
         break :size size;
     };
@@ -575,6 +579,7 @@ pub fn init(
         .thread = &self.renderer_thread,
     });
     errdefer renderer_impl.deinit();
+    renderer_impl.publishPresentationGeometry(padding_policy, 0);
 
     // The mutex used to protect our renderer state.
     const mutex = try alloc.create(std.Io.Mutex);
@@ -615,6 +620,8 @@ pub fn init(
         .font_size = font_size,
         .font_size_adjusted = false,
         .font_metrics = font_grid.metrics,
+        .font_revision = 0,
+        .padding_policy = padding_policy,
         .renderer = renderer_impl,
         .renderer_thread = render_thread,
         .renderer_state = .{
@@ -1139,7 +1146,6 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
             // after a switch so that full-screen programs which install their
             // SIGWINCH handler slightly late still receive a resize.
             self.screen_is_alt = alt;
-            self.applyPadding();
             // Re-assert the size unchanged. The termio layer sends SIGWINCH
             // explicitly, so this notifies late-initializing programs without
             // mutating the grid (which previously caused horizontal jitter).
@@ -1749,6 +1755,18 @@ fn updateRendererHealth(self: *Surface, health: rendererpkg.Health) void {
     ) catch |err| {
         log.warn("failed to notify app of renderer health change err={}", .{err});
     };
+}
+
+/// Deliver a pending renderer health change on the app thread. The runtime
+/// callback may remove this surface, so don't use `self` after a true return.
+pub fn pollRendererHealth(self: *Surface) bool {
+    if (comptime @hasDecl(Renderer, "takePendingHealth")) {
+        if (self.renderer.takePendingHealth()) |health| {
+            self.updateRendererHealth(health);
+            return true;
+        }
+    }
+    return false;
 }
 
 /// Called when the scrollbar state changes.
@@ -2489,13 +2507,11 @@ fn setSelectionAndCopy(self: *Surface, sel: terminal.Selection) !void {
 
 /// Change the cell size for the terminal grid. This can happen as
 /// a result of changing the font size at runtime.
-fn setCellSize(self: *Surface, size: rendererpkg.CellSize) !void {
+fn setCellSize(self: *Surface, size: rendererpkg.CellSize) void {
     // Update our cell size within our size struct
     self.size.cell = size;
     self.applyPadding();
-
-    // Notify the terminal
-    self.queueIo(.{ .resize = self.size }, .unlocked);
+    self.publishResize();
 
     // Update our terminal default size if necessary.
     self.recomputeInitialSize() catch |err| {
@@ -2503,13 +2519,6 @@ fn setCellSize(self: *Surface, size: rendererpkg.CellSize) !void {
         // an initial size shouldn't stop our terminal from working.
         log.warn("unable to recompute initial window size: {}", .{err});
     };
-
-    // Notify the window
-    _ = try self.rt_app.performAction(
-        .{ .surface = self },
-        .cell_size,
-        .{ .width = size.width, .height = size.height },
-    );
 }
 
 /// Change the font size.
@@ -2526,10 +2535,17 @@ pub fn setFontSize(self: *Surface, size: font.face.DesiredSize) !void {
         &self.config.font,
         self.font_size,
     );
-    errdefer self.app.font_grid_set.deref(font_grid_key);
+    var owns_font_grid_key = true;
+    errdefer if (owns_font_grid_key)
+        self.app.font_grid_set.deref(font_grid_key);
+
+    // Bump the font revision before the new cell geometry is published.
+    const font_revision = std.math.add(u64, self.font_revision, 1) catch
+        unreachable;
+    self.font_revision = font_revision;
 
     // Set our cell size
-    try self.setCellSize(.{
+    self.setCellSize(.{
         .width = font_grid.metrics.cell_width,
         .height = font_grid.metrics.cell_height,
     });
@@ -2540,6 +2556,7 @@ pub fn setFontSize(self: *Surface, size: font.face.DesiredSize) !void {
         .font_grid = .{
             .grid = font_grid,
             .set = &self.app.font_grid_set,
+            .revision = font_revision,
             .old_key = self.font_grid_key,
             .new_key = font_grid_key,
         },
@@ -2548,9 +2565,21 @@ pub fn setFontSize(self: *Surface, size: font.face.DesiredSize) !void {
     // Once we've sent the key we can replace our key
     self.font_grid_key = font_grid_key;
     self.font_metrics = font_grid.metrics;
+    owns_font_grid_key = false;
 
     // Schedule render which also drains our mailbox
     self.queueRender() catch unreachable;
+
+    // Notify the window last: a failing callback must not release a grid
+    // already handed to the renderer.
+    _ = try self.rt_app.performAction(
+        .{ .surface = self },
+        .cell_size,
+        .{
+            .width = font_grid.metrics.cell_width,
+            .height = font_grid.metrics.cell_height,
+        },
+    );
 }
 
 /// This queues a render operation with the renderer thread. The render
@@ -2617,6 +2646,13 @@ fn resize(self: *Surface, size: rendererpkg.ScreenSize) !void {
     }
 
     // Mail the IO thread
+    self.publishResize();
+}
+
+/// Publish the padding policy straight to the renderer, without waiting for
+/// its draw or GPU work, then mail the new size to the IO thread.
+fn publishResize(self: *Surface) void {
+    self.renderer.publishPresentationGeometry(self.padding_policy, self.font_revision);
     self.queueIo(.{ .resize = self.size }, .unlocked);
 
     // Mail the render thread so it updates its padding and screen size.
@@ -2637,36 +2673,24 @@ fn resize(self: *Surface, size: rendererpkg.ScreenSize) !void {
 /// programs can use the entire surface. The primary screen (the shell and
 /// scrollback) uses the configured padding.
 fn applyPadding(self: *Surface) void {
-    const balance = self.config.window_padding_balance;
-    if (self.screen_is_alt) {
-        // Full-bleed: drop the configured padding so the grid fills the
-        // surface. The viewport is rarely an exact multiple of the cell
-        // size, so a sub-cell remainder is left on the right/bottom. When
-        // padding balancing is on we spread that remainder around all four
-        // edges instead, which lets window-padding-color = extend-always
-        // paint it with the nearest cell colours (no visible strip).
-        if (balance != .false) {
-            self.size.balancePadding(.{}, balance);
-        } else {
-            self.size.padding = .{};
-        }
-        return;
-    }
-
     // The content scale can fail; in that case fall back to no padding
-    // rather than risk stale padding from the alternate screen.
+    // and mark the policy unavailable.
     const content_scale = self.rt_surface.getContentScale() catch {
-        self.size.padding = .{};
+        self.padding_policy.screen_alt = self.screen_is_alt;
+        self.padding_policy.policy_available = false;
+        self.padding_policy.apply(&self.size);
         return;
     };
     const x_dpi = content_scale.x * font.face.default_dpi;
     const y_dpi = content_scale.y * font.face.default_dpi;
-    const explicit = self.config.scaledPadding(x_dpi, y_dpi);
-    if (balance != .false) {
-        self.size.balancePadding(explicit, balance);
-    } else {
-        self.size.padding = explicit;
-    }
+    self.padding_policy = .{
+        .explicit_padding_px = self.config.scaledPadding(x_dpi, y_dpi),
+        .balance = self.config.window_padding_balance,
+        .screen_alt = self.screen_is_alt,
+        .content_scale = content_scale,
+        .policy_available = true,
+    };
+    self.padding_policy.apply(&self.size);
 }
 
 /// Called to set the preedit state for character input. Preedit is used
@@ -3477,6 +3501,16 @@ pub fn occlusionCallback(self: *Surface, visible: bool) !void {
         .visible = visible,
     }, .{ .forever = {} });
 
+    try self.queueRender();
+}
+
+/// Callback for when the native surface enters or leaves an interactive
+/// resize. Size updates still arrive through sizeCallback.
+pub fn liveResizeCallback(self: *Surface, resizing: bool) !void {
+    self.renderer.setPresentationLiveResizing(resizing);
+    _ = self.renderer_thread.mailbox.push(global.io(), .{
+        .live_resizing = resizing,
+    }, .forever);
     try self.queueRender();
 }
 

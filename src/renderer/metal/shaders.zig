@@ -263,6 +263,14 @@ pub const Uniforms = extern struct {
         use_linear_correction: bool align(1) = false,
     },
 
+    /// Half-open physical viewport of the captured content, translated to
+    /// the current padding origin. The full-target background is not clipped.
+    /// Unbounded by default so non-resize users retain their existing draws.
+    grid_clip: [4]f32 align(16) = .{
+        -std.math.inf(f32), -std.math.inf(f32),
+        std.math.inf(f32),  std.math.inf(f32),
+    },
+
     const PaddingExtend = packed struct(u8) {
         left: bool = false,
         right: bool = false,

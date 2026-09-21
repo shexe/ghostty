@@ -523,6 +523,8 @@ pub fn resize(
         );
         if (synchronized) self.terminal.modes.set(.synchronized_output, true);
 
+        self.renderer_state.size = size;
+
         // Resize the PTY under the lock, so a fast SIGWINCH response is never
         // parsed into the old grid.
         try self.backend.resize(grid_size, size.terminal());
