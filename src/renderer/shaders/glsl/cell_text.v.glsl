@@ -34,6 +34,7 @@ out CellTextVertexOut {
     flat vec4 color;
     flat vec4 bg_color;
     vec2 tex_coord;
+    flat uint synthetic_above;
 } out_data;
 
 layout(binding = 1, std430) readonly buffer bg_cells {
@@ -78,6 +79,7 @@ void main() {
     corner.y = float(vid == 2 || vid == 3);
 
     out_data.atlas = atlas;
+    out_data.synthetic_above = grid_pos.y == grid_size.y + 2u ? 1u : 0u;
 
     //              === Grid Cell ===
     //      +X

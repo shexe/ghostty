@@ -490,7 +490,9 @@ fragment float4 cell_bg_fragment(
   // grid_size.y and grid_size.y + 1 (natural positions) and the row
   // above at grid_size.y + 2.
   if (grid_pos.y < 0) {
-    if (grid_pos.y == -1 && (uniforms.grid_extra_rows & EXTRA_ABOVE)) {
+    if (grid_pos.y == -1 &&
+        (uniforms.grid_extra_rows & EXTRA_ABOVE) &&
+        in.position.y >= uniforms.grid_padding.x) {
       grid_pos.y = uniforms.grid_size.y + 2;
     } else if (uniforms.padding_extend & EXTEND_UP) {
       grid_pos.y = 0;
@@ -573,6 +575,7 @@ struct CellTextVertexOut {
   float4 color [[flat]];
   float4 bg_color [[flat]];
   float2 tex_coord;
+  bool synthetic_above [[flat]];
 };
 
 vertex CellTextVertexOut cell_text_vertex(
@@ -612,6 +615,7 @@ vertex CellTextVertexOut cell_text_vertex(
 
   CellTextVertexOut out;
   out.atlas = in.atlas;
+  out.synthetic_above = in.grid_pos.y == uniforms.grid_size.y + 2;
 
   //              === Grid Cell ===
   //      +X
@@ -715,6 +719,11 @@ fragment float4 cell_text_fragment(
   texture2d<float> textureColor [[texture(1)]],
   constant Uniforms& uniforms [[buffer(1)]]
 ) {
+  // The synthetic row above exists only to fill the slice opened inside the
+  // grid by positive pixel scrolling. Never let it paint fixed top padding.
+  if (in.synthetic_above && in.position.y < uniforms.grid_padding.x) {
+    discard_fragment();
+  }
   constexpr sampler textureSampler(
     coord::pixel,
     address::clamp_to_edge,
