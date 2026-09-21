@@ -45,6 +45,30 @@ const DisplayLink = switch (builtin.os.tag) {
 
 const log = std.log.scoped(.generic_renderer);
 
+const ExtraRowVisibility = struct {
+    below: bool = false,
+    below2: bool = false,
+    above: bool = false,
+};
+
+/// Select the prepared rows outside the viewport that can contribute to this
+/// frame. The row above is needed only while a positive pixel-scroll offset
+/// shifts the visible grid down. At zero or a negative offset it would sit in
+/// the fixed top padding and expose a clipped history row.
+fn visibleExtraRows(
+    mouse_reporting: bool,
+    screen_alt: bool,
+    scroll_offset: f64,
+    available: ExtraRowVisibility,
+) ExtraRowVisibility {
+    if (mouse_reporting or screen_alt) return .{};
+    return .{
+        .below = available.below,
+        .below2 = available.below2,
+        .above = scroll_offset > 0 and available.above,
+    };
+}
+
 /// Create a renderer type with the provided graphics API wrapper.
 ///
 /// The graphics API wrapper must provide the interface outlined below.
@@ -1531,16 +1555,21 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 const scroll_offset = state.scrollOffset();
                 state.mouse.applied_scroll_y = scroll_offset;
 
-                // Whether the extra rows beyond the viewport edges may be
-                // shown at all. The below row renders into the blank slack
-                // at the bottom of the window even at a zero offset (so
-                // the next line is always peeking, like any smooth
-                // scrolling UI), so this is gated by mode rather than by
-                // the offset: applications handling their own mouse and
-                // the alternate screen don't show scrollback continuity.
-                const extras_visible = state.terminal.flags.mouse_event == .none and
-                    state.terminal.screens.active_key != .alternate;
+                // The below rows render into bottom slack even at zero offset.
+                // The row above is different: it contributes only while a
+                // positive pixel offset shifts the grid down. Otherwise its
+                // lower half would leak through fixed top padding.
                 const overscan = self.terminal_state.overscan;
+                const extra_rows = visibleExtraRows(
+                    state.terminal.flags.mouse_event != .none,
+                    state.terminal.screens.active_key == .alternate,
+                    scroll_offset,
+                    .{
+                        .below = overscan.below >= 1,
+                        .below2 = overscan.below >= 2,
+                        .above = overscan.above >= 1,
+                    },
+                );
 
                 break :critical .{
                     .links = links,
@@ -1549,9 +1578,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .scrollbar = scrollbar,
                     .overlay_features = overlay_features,
                     .scroll_offset = scroll_offset,
-                    .extra_below_visible = extras_visible and overscan.below >= 1,
-                    .extra_below2_visible = extras_visible and overscan.below >= 2,
-                    .extra_above_visible = extras_visible and overscan.above >= 1,
+                    .extra_below_visible = extra_rows.below,
+                    .extra_below2_visible = extra_rows.below2,
+                    .extra_above_visible = extra_rows.above,
                 };
             };
 
