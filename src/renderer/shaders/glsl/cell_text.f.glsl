@@ -1,5 +1,7 @@
 #include "common.glsl"
 
+layout(origin_upper_left) in vec4 gl_FragCoord;
+
 layout(binding = 0) uniform sampler2DRect atlas_grayscale;
 layout(binding = 1) uniform sampler2DRect atlas_color;
 
@@ -8,6 +10,7 @@ in CellTextVertexOut {
     flat vec4 color;
     flat vec4 bg_color;
     vec2 tex_coord;
+    flat uint synthetic_above;
 } in_data;
 
 // Values `atlas` can take.
@@ -18,6 +21,12 @@ const uint ATLAS_COLOR = 1u;
 layout(location = 0) out vec4 out_FragColor;
 
 void main() {
+    // The synthetic row above fills only the content-grid slice revealed by
+    // positive pixel scrolling; fixed top padding remains padding.
+    if (in_data.synthetic_above != 0u && gl_FragCoord.y < grid_padding.x) {
+        discard;
+    }
+
     bool use_linear_blending = (bools & USE_LINEAR_BLENDING) != 0;
     bool use_linear_correction = (bools & USE_LINEAR_CORRECTION) != 0;
 
