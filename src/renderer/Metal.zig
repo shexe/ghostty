@@ -17,6 +17,7 @@ const shadertoy = @import("shadertoy.zig");
 
 const mtl = @import("metal/api.zig");
 const IOSurfaceLayer = @import("metal/IOSurfaceLayer.zig");
+pub const DrawableLease = IOSurfaceLayer.Drawable;
 
 pub const GraphicsAPI = Metal;
 pub const Target = @import("metal/Target.zig");
@@ -57,6 +58,13 @@ default_storage_mode: mtl.MTLResourceOptions.StorageMode,
 
 /// The maximum 2D texture width and height supported by the device.
 max_texture_size: u32,
+
+/// Pixel format shared by the render targets and the layer's drawables.
+pixel_format: mtl.MTLPixelFormat,
+
+/// Monotonically increasing identifier assigned while the generic renderer's
+/// draw mutex is held. The layer uses it to reject a late completed frame.
+next_frame_id: u64 = 0,
 
 /// We start an AutoreleasePool before `drawFrame` and end it afterwards.
 autorelease_pool: ?*objc.AutoreleasePool = null,
@@ -105,10 +113,19 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !Metal {
         else => @compileError("unsupported apprt for metal"),
     };
 
+    const pixel_format: mtl.MTLPixelFormat = if (opts.config.blending.isLinear())
+        .bgra8unorm_srgb
+    else
+        .bgra8unorm;
     // Create an IOSurfaceLayer which we can assign to the view to make
     // it in to a "layer-hosting view", so that we can manually control
     // the layer contents.
-    var layer = try IOSurfaceLayer.init();
+    var layer = try IOSurfaceLayer.init(
+        max_texture_size,
+        device,
+        queue,
+        @intFromEnum(pixel_format),
+    );
     errdefer layer.release();
 
     // Add our layer to the view.
@@ -152,10 +169,12 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !Metal {
         .blending = opts.config.blending,
         .default_storage_mode = default_storage_mode,
         .max_texture_size = max_texture_size,
+        .pixel_format = pixel_format,
     };
 }
 
 pub fn deinit(self: *Metal) void {
+    self.layer.setDisplayCallback(null, null);
     self.queue.release();
     self.device.release();
     self.layer.release();
@@ -170,7 +189,36 @@ pub fn loopEnter(self: *Metal) void {
 }
 
 fn displayCallback(renderer: *Renderer) align(8) void {
-    renderer.drawFrame(true) catch |err| {
+    // Consume the coalesced native request before any early return so a later
+    // completion can request the next transaction.
+    const native = renderer.api.layer.beginNativeDisplay();
+    switch (renderer.api.layer.drainCompletedFrame()) {
+        .accepted => return,
+        .deferred => {
+            renderer.api.layer.requestNativeRedraw();
+            return;
+        },
+        .empty, .rejected, .superseded => {},
+    }
+
+    const size = renderer.api.surfaceSize() catch return;
+    var drawable: ?DrawableLease = renderer.api.acquireDrawable(
+        size.width,
+        size.height,
+        native.main_render_serial,
+    ) catch |err| {
+        if (err == error.DrawableBusy) renderer.api.layer.requestNativeRedraw();
+        // While this callback owns live-resize rendering, the CPU request
+        // stays unserviced until a later callback acquires a drawable.
+        if (native.main_render_active) return;
+        // Still prepare the newest target; its completion enters the one-slot
+        // mailbox and returned drawable credit schedules its presentation.
+        var none: ?DrawableLease = null;
+        renderer.drawFrameDisplayCallback(false, &none) catch {};
+        return;
+    };
+    defer if (drawable) |*value| renderer.api.discardDrawable(value);
+    renderer.drawFrameDisplayCallback(true, &drawable) catch |err| {
         log.warn("Error drawing frame in display callback, err={}", .{err});
     };
 }
@@ -214,21 +262,37 @@ pub fn initShaders(
 
 /// Get the current size of the runtime surface.
 pub fn surfaceSize(self: *const Metal) !struct { width: u32, height: u32 } {
-    const bounds = self.layer.layer.getProperty(graphics.Rect, "bounds");
-    const scale = self.layer.layer.getProperty(f64, "contentsScale");
+    const geometry = try self.surfaceGeometry();
 
     // We need to clamp our runtime surface size to the maximum
     // possible texture size since we can't create a screen buffer (texture)
     // larger than that.
     return .{
-        .width = @min(
-            @as(u32, @intFromFloat(bounds.size.width * scale)),
-            self.max_texture_size,
-        ),
-        .height = @min(
-            @as(u32, @intFromFloat(bounds.size.height * scale)),
-            self.max_texture_size,
-        ),
+        .width = @min(geometry.size.width, self.max_texture_size),
+        .height = @min(geometry.size.height, self.max_texture_size),
+    };
+}
+
+pub const SurfaceGeometry = struct {
+    /// Raw physical backing bounds before GPU texture-size clamping.
+    size: rendererpkg.ScreenSize,
+    content_scale: apprt.ContentScale,
+};
+
+/// Get raw backing geometry and the scale used to derive it.
+pub fn surfaceGeometry(self: *const Metal) !SurfaceGeometry {
+    const bounds = self.layer.layer.getProperty(graphics.Rect, "bounds");
+    const scale = self.layer.layer.getProperty(f64, "contentsScale");
+
+    return .{
+        .size = .{
+            .width = @intFromFloat(bounds.size.width * scale),
+            .height = @intFromFloat(bounds.size.height * scale),
+        },
+        .content_scale = .{
+            .x = @floatCast(scale),
+            .y = @floatCast(scale),
+        },
     };
 }
 
@@ -239,23 +303,61 @@ pub fn initTarget(self: *const Metal, width: usize, height: usize) !Target {
         // Using an `*_srgb` pixel format makes Metal gamma encode the pixels
         // written to it *after* blending, which means we get linear alpha
         // blending rather than gamma-incorrect blending.
-        .pixel_format = if (self.blending.isLinear())
-            .bgra8unorm_srgb
-        else
-            .bgra8unorm,
+        .pixel_format = self.pixel_format,
         .storage_mode = self.default_storage_mode,
         .width = width,
         .height = height,
     });
 }
 
-/// Present the provided target.
-pub inline fn present(self: *Metal, target: Target, sync: bool) !void {
+/// Submit the provided target's contents to the layer.
+pub inline fn present(
+    self: *Metal,
+    target: Target,
+    frame_id: u64,
+    sync: bool,
+) !void {
     if (sync) {
-        self.layer.setSurfaceSync(target.surface);
+        self.layer.setTargetSync(target.surface, target.texture, frame_id);
     } else {
-        try self.layer.setSurface(target.surface);
+        self.layer.setTarget(target.surface, target.texture, frame_id);
     }
+}
+
+pub fn acquireDrawable(
+    self: *Metal,
+    width: usize,
+    height: usize,
+    main_render_serial: u64,
+) !DrawableLease {
+    return self.layer.acquireDrawable(width, height, main_render_serial);
+}
+
+pub fn discardDrawable(self: *Metal, drawable: *DrawableLease) void {
+    self.layer.discardDrawable(drawable);
+}
+
+pub fn presentNativeDrawable(
+    self: *Metal,
+    drawable: *DrawableLease,
+    buffer: objc.Object,
+    frame_id: u64,
+) bool {
+    return self.layer.presentNativeDrawable(drawable, buffer, frame_id);
+}
+
+pub fn requestNativeRedraw(self: *Metal) void {
+    self.layer.requestNativeRedraw();
+}
+
+pub fn handoffRendererDrawToNative(self: *Metal) bool {
+    return self.layer.handoffRendererDrawToNative();
+}
+
+pub fn setBlending(self: *Metal, value: configpkg.Config.AlphaBlending) void {
+    self.blending = value;
+    self.pixel_format = if (value.isLinear()) .bgra8unorm_srgb else .bgra8unorm;
+    self.layer.setPixelFormat(@intFromEnum(self.pixel_format));
 }
 
 /// Returns the options to use when constructing buffers.
@@ -392,14 +494,25 @@ pub fn initAtlasTexture(
 
 /// Begin a frame.
 pub inline fn beginFrame(
-    self: *const Metal,
+    self: *Metal,
     /// Once the frame has been completed, the `frameCompleted` method
     /// on the renderer is called with the health status of the frame.
     renderer: *Renderer,
-    /// The target is presented via the provided renderer's API when completed.
+    /// The target's contents are submitted via the renderer's API when completed.
     target: *Target,
+    token: Renderer.FrameToken,
+    drawable: *?DrawableLease,
 ) !Frame {
-    return try Frame.begin(.{ .queue = self.queue }, renderer, target);
+    std.debug.assert(self.next_frame_id < std.math.maxInt(u64));
+    self.next_frame_id += 1;
+    return try Frame.begin(
+        .{ .queue = self.queue },
+        renderer,
+        target,
+        self.next_frame_id,
+        token,
+        drawable,
+    );
 }
 
 /// Warm up the Metal device machinery. The first Metal device query in
