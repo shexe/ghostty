@@ -176,6 +176,23 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// cells for the draw call.
         cells_rebuilt: bool = false,
 
+        /// Region scroll animations in flight (see `RegionAnim`), the
+        /// scrolls drained from the terminal that they have yet to take
+        /// in, and the clock the shifts decay against. `region_anim_screen`
+        /// is the screen they were recorded on; a switch drops them.
+        region_anims: std.ArrayListUnmanaged(RegionAnim) = .empty,
+        pending_region_scrolls: std.ArrayListUnmanaged(terminal.Screen.RegionScroll) = .empty,
+        region_anim_tick: ?std.Io.Timestamp = null,
+        region_anim_screen: ?terminal.ScreenSet.Key = null,
+
+        /// What is uploaded to the GPU while ghost rows exist: the live
+        /// background cells followed by one row per ghost, and the ghost
+        /// glyphs re-addressed to grid rows past the live grid. Rebuilt
+        /// whenever the animations change; empty otherwise.
+        ghost_bg_upload: std.ArrayListUnmanaged(shaderpkg.CellBg) = .empty,
+        ghost_fg_upload: std.ArrayListUnmanaged(shaderpkg.CellText) = .empty,
+        fg_upload_lists: std.ArrayListUnmanaged(std.ArrayListUnmanaged(shaderpkg.CellText)) = .empty,
+
         /// The current GPU uniform values.
         uniforms: shaderpkg.Uniforms,
 
@@ -841,6 +858,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
 
             self.cells.deinit(self.alloc);
+            self.clearRegionAnims();
+            self.region_anims.deinit(self.alloc);
+            self.pending_region_scrolls.deinit(self.alloc);
+            self.ghost_bg_upload.deinit(self.alloc);
+            self.ghost_fg_upload.deinit(self.alloc);
+            self.fg_upload_lists.deinit(self.alloc);
 
             self.font_shaper.deinit();
             self.font_shaper_cache.deinit(self.alloc);
@@ -1069,6 +1092,61 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.syncDisplayLink(id, draw_now);
         }
 
+        /// A scroll region of the alternate screen whose content a
+        /// program moved by whole rows (Helix scrolling a view, `less`
+        /// paging), being drawn as motion. The region's new content is
+        /// drawn `shift` pixels from where it belongs, which is where the
+        /// old content was, and slides home as the shift decays; the rows
+        /// that scrolled out stay on as ghosts, sliding out ahead of it
+        /// and clipped at the region's edge. Another scroll of the same
+        /// region while it is moving adds to the shift, so a program
+        /// stepping rows on a timer reads as one continuous motion.
+        ///
+        /// Ghost cells are the previous frame's GPU cells for the rows
+        /// that left: they need no terminal access, only the frame before.
+        const RegionAnim = struct {
+            region: terminal.Screen.RegionScroll,
+            /// Pixels the content is drawn below its final place (negative:
+            /// above).
+            shift: f64,
+            ghosts: std.ArrayListUnmanaged(Ghost) = .empty,
+            /// Frames drawn so far, for the log line when it ends.
+            frames: u32 = 0,
+
+            const Ghost = struct {
+                /// The grid row this row now belongs at, outside the region.
+                final_row: i32,
+                bg: []shaderpkg.CellBg,
+                fg: []shaderpkg.CellText,
+
+                fn deinit(self: *Ghost, alloc: Allocator) void {
+                    alloc.free(self.bg);
+                    alloc.free(self.fg);
+                }
+            };
+
+            fn deinit(self: *RegionAnim, alloc: Allocator) void {
+                for (self.ghosts.items) |*ghost| ghost.deinit(alloc);
+                self.ghosts.deinit(alloc);
+            }
+
+            /// Grid-pixel extent of the region: left, top, right, bottom.
+            fn rect(self: *const RegionAnim, cell_w: f32, cell_h: f32) [4]f32 {
+                const r = self.region;
+                return .{
+                    @as(f32, @floatFromInt(r.left)) * cell_w,
+                    @as(f32, @floatFromInt(r.top)) * cell_h,
+                    @as(f32, @floatFromInt(@as(u32, r.right) + 1)) * cell_w,
+                    @as(f32, @floatFromInt(@as(u32, r.bottom) + 1)) * cell_h,
+                };
+            }
+        };
+
+        /// How long a region scroll takes to close 63% of its remaining
+        /// distance. A half-page jump lands in about a quarter second,
+        /// most of it in the first hundred milliseconds.
+        const region_anim_tau_s: f64 = 0.045;
+
         /// The cadence of continuous (draw-only) animation wakes,
         /// i.e. 120fps, and the floor for any animation wake delay.
         pub const draw_interval_ms: u64 = 8;
@@ -1127,16 +1205,251 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 break :kitty @max(next -| now_ms, draw_interval_ms);
             };
 
+            // Region scroll animations decay every draw while any is
+            // in flight; the shift is recomputed from the clock in
+            // drawFrame, so a draw wake is all they need.
+            const draw_delay: ?u64 = if (self.region_anims.items.len > 0)
+                draw_interval_ms
+            else
+                shader_delay;
+
             // An update wake includes a draw, so it wins ties.
             if (kitty_delay) |k| {
-                if (shader_delay == null or k <= shader_delay.?) {
+                if (draw_delay == null or k <= draw_delay.?) {
                     return .{ .delay_ms = k, .kind = .update };
                 }
             }
 
-            if (shader_delay) |s| return .{ .delay_ms = s, .kind = .draw };
+            if (draw_delay) |s| return .{ .delay_ms = s, .kind = .draw };
 
             return null;
+        }
+
+        /// Drop every region scroll animation and its ghost rows.
+        fn clearRegionAnims(self: *Self) void {
+            for (self.region_anims.items) |*anim| anim.deinit(self.alloc);
+            self.region_anims.clearRetainingCapacity();
+            self.region_anim_tick = null;
+        }
+
+        /// Take the region scrolls recorded since the previous frame into
+        /// the animations, making ghost rows of the rows that scrolled out
+        /// from the previous frame's GPU cells. Must run in rebuildCells
+        /// before those cells are rebuilt, under the draw mutex.
+        fn applyRegionScrolls(
+            self: *Self,
+            state: *const terminal.RenderState,
+            grid_changed: bool,
+        ) void {
+            defer self.pending_region_scrolls.clearRetainingCapacity();
+
+            // A resize scrambles the cells the ghosts would come from, and
+            // a screen switch leaves nothing to animate.
+            if (grid_changed or
+                self.region_anim_screen == null or
+                self.region_anim_screen.? != state.screen)
+            {
+                self.clearRegionAnims();
+                self.region_anim_screen = state.screen;
+                if (grid_changed) {
+                    // The pending scrolls refer to the old grid; drop them
+                    // and leave the uniforms describing no animation.
+                    self.rebuildRegionUniforms();
+                    return;
+                }
+            }
+
+            const cell_h: f64 = @floatFromInt(self.grid_metrics.cell_height);
+            const cols: usize = self.cells.size.columns;
+            for (self.pending_region_scrolls.items) |scroll| {
+                const anim: *RegionAnim = anim: {
+                    for (self.region_anims.items) |*anim| {
+                        if (anim.region.sameRegion(scroll)) break :anim anim;
+                    }
+                    if (self.region_anims.items.len >= shaderpkg.Uniforms.max_region_anims) continue;
+                    self.region_anims.append(self.alloc, .{
+                        .region = scroll,
+                        .shift = 0,
+                    }) catch continue;
+                    break :anim &self.region_anims.items[self.region_anims.items.len - 1];
+                };
+
+                // The new content is drawn where the old was: `lines` rows
+                // away. Beyond the region's height nothing of the old
+                // content is left to slide, so the shift is capped there.
+                const height_px: f64 = @as(f64, @floatFromInt(@as(u32, scroll.bottom - scroll.top) + 1)) * cell_h;
+                anim.shift = std.math.clamp(
+                    anim.shift + @as(f64, @floatFromInt(scroll.lines)) * cell_h,
+                    -height_px,
+                    height_px,
+                );
+                for (anim.ghosts.items) |*ghost| ghost.final_row -= scroll.lines;
+
+                // The rows that left the region, as the previous frame drew
+                // them. A scroll up loses rows at the top, a scroll down at
+                // the bottom; each ends up `lines` rows from where it was.
+                const count: usize = @intCast(@abs(scroll.lines));
+                const first: usize = if (scroll.lines > 0)
+                    scroll.top
+                else
+                    @as(usize, scroll.bottom) + 1 - count;
+                for (first..first + count) |row| {
+                    if (row >= self.cells.size.rows) break;
+                    const bg = self.alloc.dupe(
+                        shaderpkg.CellBg,
+                        self.cells.bg_cells[row * cols ..][0..cols],
+                    ) catch break;
+                    const fg = self.alloc.dupe(
+                        shaderpkg.CellText,
+                        self.cells.fg_rows[row + 1].items,
+                    ) catch {
+                        self.alloc.free(bg);
+                        break;
+                    };
+                    anim.ghosts.append(self.alloc, .{
+                        .final_row = @as(i32, @intCast(row)) - scroll.lines,
+                        .bg = bg,
+                        .fg = fg,
+                    }) catch {
+                        self.alloc.free(bg);
+                        self.alloc.free(fg);
+                        break;
+                    };
+                }
+            }
+
+            for (self.region_anims.items) |*anim| {
+                log.debug(
+                    "region scroll animation rows={}..{} cols={}..{} shift={d:.1}px ghosts={}",
+                    .{
+                        anim.region.top,
+                        anim.region.bottom,
+                        anim.region.left,
+                        anim.region.right,
+                        anim.shift,
+                        anim.ghosts.items.len,
+                    },
+                );
+            }
+
+            self.pruneGhosts();
+            self.rebuildRegionUniforms();
+        }
+
+        /// Drop ghost rows that have slid out of sight, and the oldest
+        /// ones beyond what the uniforms can carry.
+        fn pruneGhosts(self: *Self) void {
+            const cell_h: f64 = @floatFromInt(self.grid_metrics.cell_height);
+            var total: usize = 0;
+            for (self.region_anims.items) |*anim| {
+                const top: f64 = @as(f64, @floatFromInt(anim.region.top)) * cell_h;
+                const bottom: f64 = @as(f64, @floatFromInt(@as(u32, anim.region.bottom) + 1)) * cell_h;
+                var i: usize = 0;
+                while (i < anim.ghosts.items.len) {
+                    const ghost = &anim.ghosts.items[i];
+                    const y: f64 = @as(f64, @floatFromInt(ghost.final_row)) * cell_h + anim.shift;
+                    if (y + cell_h <= top or y >= bottom) {
+                        ghost.deinit(self.alloc);
+                        _ = anim.ghosts.orderedRemove(i);
+                        continue;
+                    }
+                    i += 1;
+                }
+                total += anim.ghosts.items.len;
+            }
+            // Oldest first: the earliest ghosts are the farthest out.
+            var over: usize = total -| shaderpkg.Uniforms.max_ghost_rows;
+            while (over > 0) : (over -= 1) {
+                for (self.region_anims.items) |*anim| {
+                    if (anim.ghosts.items.len == 0) continue;
+                    anim.ghosts.items[0].deinit(self.alloc);
+                    _ = anim.ghosts.orderedRemove(0);
+                    break;
+                }
+            }
+        }
+
+        /// Advance the region scroll animations to now. Called once per
+        /// drawn frame, before the uniforms are uploaded.
+        fn tickRegionAnims(self: *Self) void {
+            if (self.region_anims.items.len == 0) return;
+            const now: std.Io.Timestamp = .now(global.io(), .awake);
+            const last = self.region_anim_tick orelse now;
+            self.region_anim_tick = now;
+            const dt_ns: f64 = @floatFromInt(@max(last.durationTo(now).nanoseconds, 0));
+            const factor = @exp(-(dt_ns / std.time.ns_per_s) / region_anim_tau_s);
+
+            var i: usize = 0;
+            while (i < self.region_anims.items.len) {
+                const anim = &self.region_anims.items[i];
+                anim.shift *= factor;
+                anim.frames += 1;
+                if (@abs(anim.shift) < 0.5) {
+                    log.debug(
+                        "region scroll animation done rows={}..{} after {} frames",
+                        .{ anim.region.top, anim.region.bottom, anim.frames },
+                    );
+                    anim.deinit(self.alloc);
+                    _ = self.region_anims.orderedRemove(i);
+                    continue;
+                }
+                i += 1;
+            }
+            if (self.region_anims.items.len == 0) self.region_anim_tick = null;
+
+            self.pruneGhosts();
+            self.rebuildRegionUniforms();
+        }
+
+        /// Write the animations into the uniforms and rebuild the ghost
+        /// upload buffers. Ghosts follow every row the cell buffers already
+        /// hold (the viewport and the extra rows beyond its edges): ghost
+        /// `k` is grid row `ghost_base + k`, and `anim_counts.z` tells the
+        /// shaders where that base is.
+        fn rebuildRegionUniforms(self: *Self) void {
+            const cell_w: f32 = @floatFromInt(self.grid_metrics.cell_width);
+            const cell_h: f32 = @floatFromInt(self.grid_metrics.cell_height);
+            const cols: usize = self.cells.size.columns;
+            const ghost_base: usize = if (cols == 0) 0 else self.cells.bg_cells.len / cols;
+
+            self.uniforms.region_rect = @splat(@splat(0));
+            self.uniforms.region_shift = @splat(@splat(0));
+            self.uniforms.ghost_rows = @splat(@splat(-1));
+            self.ghost_bg_upload.clearRetainingCapacity();
+            self.ghost_fg_upload.clearRetainingCapacity();
+
+            var ghost_count: usize = 0;
+            for (self.region_anims.items, 0..) |*anim, i| {
+                self.uniforms.region_rect[i] = anim.rect(cell_w, cell_h);
+                self.uniforms.region_shift[i] = .{ @floatCast(anim.shift), 0, 0, 0 };
+                for (anim.ghosts.items) |ghost| {
+                    if (ghost_count >= shaderpkg.Uniforms.max_ghost_rows) break;
+                    const grid_row: usize = ghost_base + ghost_count;
+                    if (grid_row > std.math.maxInt(u16)) break;
+                    self.uniforms.ghost_rows[ghost_count] = .{ @intCast(i), ghost.final_row, 0, 0 };
+                    // Upload buffers only grow; a failure here leaves a
+                    // ghost undrawn, which is a gap in the motion, not an
+                    // error.
+                    if (ghost.bg.len == cols) {
+                        self.ghost_bg_upload.appendSlice(self.alloc, ghost.bg) catch break;
+                    } else {
+                        self.ghost_bg_upload.appendNTimes(self.alloc, .{ 0, 0, 0, 0 }, cols) catch break;
+                    }
+                    for (ghost.fg) |cell| {
+                        var moved = cell;
+                        moved.grid_pos[1] = @intCast(grid_row);
+                        self.ghost_fg_upload.append(self.alloc, moved) catch break;
+                    }
+                    ghost_count += 1;
+                }
+            }
+            self.uniforms.anim_counts = .{
+                @intCast(self.region_anims.items.len),
+                @intCast(ghost_count),
+                @intCast(ghost_base),
+                0,
+            };
+            self.cells_rebuilt = true;
         }
 
         /// True if our renderer is using vsync. If true, the renderer or apprt
@@ -1429,6 +1742,17 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     self.alloc,
                     state.terminal,
                 );
+
+                // Region scrolls since the last frame, to animate. They
+                // are applied in rebuildCells, which still has the previous
+                // frame's cells to make ghost rows from.
+                {
+                    const scrolls = &state.terminal.screens.active.region_scrolls;
+                    for (scrolls.slice()) |scroll| {
+                        self.pending_region_scrolls.append(self.alloc, scroll) catch break;
+                    }
+                    scrolls.clear();
+                }
 
                 // If our terminal state is dirty at all we need to redo
                 // the viewport search.
@@ -1879,10 +2203,31 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // Update per-frame custom shader uniforms.
             try self.updateCustomShaderUniformsForFrame();
 
-            // Setup our frame data
+            // Region scroll animations move every drawn frame.
+            self.tickRegionAnims();
+
+            // Setup our frame data. Ghost rows ride along after the live
+            // cells: background rows appended to the buffer, glyphs as one
+            // more row list.
             try frame.uniforms.sync(&.{self.uniforms});
-            try frame.cells_bg.sync(self.cells.bg_cells);
-            const fg_count = try frame.cells.syncFromArrayLists(self.cells.fg_rows);
+            const fg_count = if (self.ghost_bg_upload.items.len > 0) ghosts: {
+                self.fg_upload_lists.clearRetainingCapacity();
+                try self.fg_upload_lists.appendSlice(self.alloc, self.cells.fg_rows);
+                try self.fg_upload_lists.append(self.alloc, self.ghost_fg_upload);
+
+                var bg = try std.ArrayListUnmanaged(shaderpkg.CellBg).initCapacity(
+                    self.alloc,
+                    self.cells.bg_cells.len + self.ghost_bg_upload.items.len,
+                );
+                defer bg.deinit(self.alloc);
+                bg.appendSliceAssumeCapacity(self.cells.bg_cells);
+                bg.appendSliceAssumeCapacity(self.ghost_bg_upload.items);
+                try frame.cells_bg.sync(bg.items);
+                break :ghosts try frame.cells.syncFromArrayLists(self.fg_upload_lists.items);
+            } else plain: {
+                try frame.cells_bg.sync(self.cells.bg_cells);
+                break :plain try frame.cells.syncFromArrayLists(self.cells.fg_rows);
+            };
 
             // If our background image buffer has changed, sync it.
             if (frame.bg_image_buffer_modified != self.bg_image_buffer_modified) {
@@ -2654,6 +2999,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // our background cells will be out of place.
                 self.uniforms.grid_size = .{ new_size.columns, new_size.rows };
             }
+
+            // Region scroll animations take in this frame's scrolls now,
+            // while the cells still show the previous frame.
+            self.applyRegionScrolls(state, grid_size_diff);
 
             const rebuild = state.dirty == .full or grid_size_diff;
             if (rebuild) {

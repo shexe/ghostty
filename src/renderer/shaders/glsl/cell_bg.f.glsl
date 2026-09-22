@@ -14,10 +14,38 @@ vec4 cell_bg() {
     uvec2 grid_size = unpack2u16(grid_size_packed_2u16);
     // Account for the sub-cell scroll translation of the grid (smooth
     // scrolling) so the cell lookup matches the visually translated grid.
-    ivec2 grid_pos = ivec2(floor((gl_FragCoord.xy - grid_padding.wx - vec2(0.0, grid_offset_y)) / cell_size));
+    vec2 grid_px = gl_FragCoord.xy - grid_padding.wx - vec2(0.0, grid_offset_y);
+    ivec2 grid_pos = ivec2(floor(grid_px / cell_size));
     bool use_linear_blending = (bools & USE_LINEAR_BLENDING) != 0;
 
     vec4 bg = vec4(0.0);
+
+    // Region scroll animation: inside an animating rectangle the content
+    // is drawn shifted, so look the cell up where it is drawn from. Past
+    // the region's own rows that is a ghost row sliding out, if one is
+    // still there, and otherwise nothing: the surface background.
+    int region = region_of(grid_px);
+    if (region >= 0) {
+        vec4 r = region_rect[region];
+        float y = grid_px.y - region_shift[region].x;
+        int row = int(floor(y / cell_size.y));
+        int col = clamp(int(floor(grid_px.x / cell_size.x)), 0, int(grid_size.x) - 1);
+        int cols = int(grid_size.x);
+        if (y >= r.y && y < r.w) {
+            row = clamp(row, 0, int(grid_size.y) - 1);
+            return load_color(unpack4u8(cells[row * cols + col]), use_linear_blending);
+        }
+        for (uint k = 0u; k < anim_counts.y; k++) {
+            ivec4 ghost = ghost_rows[k];
+            if (ghost.x == region && ghost.y == row) {
+                return load_color(
+                        unpack4u8(cells[(int(anim_counts.z) + int(k)) * cols + col]),
+                        use_linear_blending
+                    );
+            }
+        }
+        return bg;
+    }
 
     // Clamp x position, extends edge bg colors in to padding on sides.
     if (grid_pos.x < 0) {

@@ -263,6 +263,24 @@ pub const Uniforms = extern struct {
         use_linear_correction: bool align(1) = false,
     },
 
+    /// Region scroll animation (alternate-screen scroll regions that a
+    /// program scrolled by rows; see `RegionAnim` in the renderer).
+    /// `region_rect[i]` is the animating rectangle in grid pixels (left,
+    /// top, right, bottom) and `region_shift[i].x` how far its content is
+    /// currently drawn from its final place, positive being down. Grid
+    /// row `anim_counts.z + k` is a ghost row: a row that scrolled out of
+    /// region `ghost_rows[k].x`, drawn at row `ghost_rows[k].y` (outside
+    /// the region) and clipped to it. `anim_counts.x` regions and `.y`
+    /// ghost rows are live, and `.z` is the grid row of ghost 0, past the
+    /// viewport's rows and the extra rows beyond its edges.
+    region_rect: [max_region_anims][4]f32 align(16) = @splat(@splat(0)),
+    region_shift: [max_region_anims][4]f32 align(16) = @splat(@splat(0)),
+    ghost_rows: [max_ghost_rows][4]i32 align(16) = @splat(@splat(-1)),
+    anim_counts: [4]u32 align(16) = @splat(0),
+
+    pub const max_region_anims = 4;
+    pub const max_ghost_rows = 64;
+
     const PaddingExtend = packed struct(u8) {
         left: bool = false,
         right: bool = false,
