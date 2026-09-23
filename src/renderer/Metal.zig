@@ -284,16 +284,40 @@ pub fn surfaceGeometry(self: *const Metal) !SurfaceGeometry {
     const bounds = self.layer.layer.getProperty(graphics.Rect, "bounds");
     const scale = self.layer.layer.getProperty(f64, "contentsScale");
 
+    // Extra pixels beyond the layer bounds, so the drawable, the render target
+    // and the size the terminal is asked for all agree on a picture larger than
+    // the window. The layer keeps its bounds, so its top-left gravity shows the
+    // matching part of that picture and clips the rest.
+    const lead = self.geometryLeadPx(scale);
+    const base_width: u32 = @intFromFloat(bounds.size.width * scale);
+    const base_height: u32 = @intFromFloat(bounds.size.height * scale);
     return .{
         .size = .{
-            .width = @intFromFloat(bounds.size.width * scale),
-            .height = @intFromFloat(bounds.size.height * scale),
+            .width = base_width + lead,
+            .height = base_height + lead,
         },
         .content_scale = .{
             .x = @floatCast(scale),
             .y = @floatCast(scale),
         },
     };
+}
+
+/// Resize lead in points: extra room the drawable, the render target and the
+/// size the terminal is asked for all take beyond the layer while a live resize
+/// runs, so the terminal draws the size the window is about to become and the
+/// edge it grows into is already painted.
+const resize_lead_points = 80;
+
+/// Zero outside a live resize, so the terminal's size is exact when a drag
+/// ends. The host measures how fast the window is moving and can ask for a
+/// larger lead; only it sees how fast the drag is going.
+fn geometryLeadPx(self: *const Metal, scale: f64) u32 {
+    if (!self.layer.liveResizing()) return 0;
+    const host = self.layer.hostResizeLeadPx();
+    if (host > 0) return host;
+    const px = resize_lead_points * scale;
+    return if (px <= 0) 0 else @intFromFloat(px);
 }
 
 /// Initialize a new render target which can be presented by this API.
