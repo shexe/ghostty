@@ -1966,6 +1966,13 @@ pub const CAPI = struct {
         surface.updateSize(w, h);
     }
 
+    /// Set the resize lead, in backing pixels, for the next size request. The
+    /// host measures how fast a drag is moving and asks for a lead that covers
+    /// it; zero disables the lead.
+    export fn ghostty_surface_set_resize_lead(surface: *Surface, px: u32) void {
+        surface.core_surface.renderer.api.layer.setResizeLeadPx(px);
+    }
+
     /// Return the size information a surface has.
     export fn ghostty_surface_size(surface: *Surface) SurfaceSize {
         const grid_size = surface.core_surface.size.grid();

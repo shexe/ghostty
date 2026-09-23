@@ -51,6 +51,9 @@ const PresentationState = struct {
     mutex: std.Io.Mutex = .init,
     pending: ?Pending = null,
     live_resizing: bool = false,
+    /// Resize lead in backing pixels, set by the host before each size it
+    /// requests; zero leaves the default lead.
+    host_resize_lead_px: std.atomic.Value(u32) = .init(0),
     detached: bool = false,
     source: ?cf.CFRunLoopSourceRef = null,
     layer: objc.Object,
@@ -310,6 +313,13 @@ pub fn setTargetSync(
     presentOrRestore(self.state, Pending.init(surface, texture, frame_id), true);
 }
 
+/// True while the host is in a live window resize.
+pub fn liveResizing(self: *const IOSurfaceLayer) bool {
+    self.state.mutex.lockUncancelable(global.io());
+    defer self.state.mutex.unlock(global.io());
+    return self.state.live_resizing;
+}
+
 pub fn setLiveResizing(self: *IOSurfaceLayer, resizing: bool) void {
     std.debug.assert(isMainThread());
     var source: ?cf.CFRunLoopSourceRef = null;
@@ -362,6 +372,16 @@ pub fn beginNativeDisplay(self: *IOSurfaceLayer) NativeDisplay {
 pub fn drainCompletedFrame(self: *IOSurfaceLayer) DrainResult {
     std.debug.assert(isMainThread());
     return drainPresentationState(self.state, true);
+}
+
+/// The host measures how fast the window is moving and asks for a lead that
+/// covers it, so a fast drag cannot outrun the picture.
+pub fn setResizeLeadPx(self: *IOSurfaceLayer, px: u32) void {
+    self.state.host_resize_lead_px.store(px, .monotonic);
+}
+
+pub fn hostResizeLeadPx(self: *const IOSurfaceLayer) u32 {
+    return self.state.host_resize_lead_px.load(.monotonic);
 }
 
 /// Outcome from consuming the bounded completed-frame mailbox on the main
@@ -495,7 +515,11 @@ fn drawableAcceptance(
     const scale = state.layer.getProperty(f64, "contentsScale");
     const layer_width: usize = @intFromFloat(bounds.size.width * scale);
     const layer_height: usize = @intFromFloat(bounds.size.height * scale);
-    if (!dimensionsMatch(
+    if (state.live_resizing) {
+        // The drawable is deliberately larger than the layer while the resize
+        // lead is active: the layer shows its top-left part and clips the rest.
+        if (width < layer_width or height < layer_height) return .size;
+    } else if (!dimensionsMatch(
         layer_width,
         layer_height,
         width,
