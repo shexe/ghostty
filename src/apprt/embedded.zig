@@ -1516,6 +1516,12 @@ pub const CAPI = struct {
         cell_height_px: u32,
     };
 
+    // ghostty_surface_pixel_size_s
+    const SurfacePixelSize = extern struct {
+        width_px: u32,
+        height_px: u32,
+    };
+
     // ghostty_clipboard_content_s
     //
     // One representation of clipboard contents. The data is binary-safe
@@ -1964,6 +1970,15 @@ pub const CAPI = struct {
     /// to the pty and the renderer.
     export fn ghostty_surface_set_size(surface: *Surface, w: u32, h: u32) void {
         surface.updateSize(w, h);
+    }
+
+    /// Pixel size of the frame currently presented on screen. Unlike
+    /// `ghostty_surface_size`, this is what the user can actually see: the
+    /// requested surface size can run ahead of what has been drawn during a
+    /// resize.
+    export fn ghostty_surface_last_presented_pixel_size(surface: *Surface) SurfacePixelSize {
+        const size = surface.core_surface.renderer.api.layer.lastPresentedPixelSize();
+        return .{ .width_px = size.width, .height_px = size.height };
     }
 
     /// Set the resize lead, in backing pixels, for the next size request. The
