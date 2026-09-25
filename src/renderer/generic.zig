@@ -242,6 +242,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// unrealized. Rebuilt on the next `drawFrame`.
         swap_chain: ?SwapChain,
 
+        /// Frames committed to the GPU (renderer thread only) and frames the
+        /// GPU has finished (completion callbacks). Image textures are only
+        /// read by committed frames on one in-order queue, so a texture
+        /// replaced after N commits is free once N frames have completed.
+        frames_committed: u64 = 0,
+        frames_completed: std.atomic.Value(u64) = .init(0),
+
         /// This value is used to force-update swap chain targets in the
         /// event of a config change that requires it (such as blending mode).
         target_config_modified: usize = 0,
@@ -1826,7 +1833,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
 
             // Upload images to the GPU as necessary.
-            _ = self.images.upload(self.alloc, &self.api);
+            _ = self.images.upload(
+                self.alloc,
+                &self.api,
+                self.frames_committed,
+                self.frames_completed.load(.acquire),
+            );
 
             // Upload the background image to the GPU as necessary.
             try self.uploadBackgroundImage();
@@ -1866,6 +1878,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             // Get a frame context from the graphics API.
             var frame_ctx = try self.api.beginFrame(self, &frame.target);
+            defer self.frames_committed += 1;
             defer frame_ctx.complete(sync);
 
             {
@@ -2023,6 +2036,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // guaranteed to exist here: it is only torn down after
             // waiting for all in-flight frames to complete, and this
             // callback is what signals that completion.
+            _ = self.frames_completed.fetchAdd(1, .release);
             self.swap_chain.?.releaseFrame();
         }
 
