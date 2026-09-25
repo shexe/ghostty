@@ -64,6 +64,10 @@ const PresentationState = struct {
     drawables_outstanding: u8 = 0,
     /// Main thread only.
     latest_accepted_id: u64 = 0,
+    /// Pixel size of the most recently presented drawable: what is actually on
+    /// screen. Main thread only.
+    presented_pixel_width: u32 = 0,
+    presented_pixel_height: u32 = 0,
     native_redraw_needed: bool = false,
     native_display_requested: bool = false,
     /// During a live resize, renderer-thread draws prepare CPU state and hand
@@ -273,6 +277,18 @@ pub fn presentNativeDrawable(
     frame_id: u64,
 ) bool {
     return presentDrawable(self.state, drawable, buffer, frame_id);
+}
+
+/// Pixel size of the frame currently on screen, i.e. the last accepted
+/// presentation. This is what the user can see; it is deliberately not the
+/// requested surface size, which can run ahead of what has been drawn.
+/// Main thread only.
+pub fn lastPresentedPixelSize(self: *IOSurfaceLayer) struct { width: u32, height: u32 } {
+    std.debug.assert(isMainThread());
+    return .{
+        .width = self.state.presented_pixel_width,
+        .height = self.state.presented_pixel_height,
+    };
 }
 
 /// Submit a completed target. Off the main thread the frame goes through the
@@ -577,6 +593,8 @@ fn presentDrawable(
     state.layer.setProperty("presentsWithTransaction", true);
     drawable.lease.presentScheduled(buffer) catch return false;
     state.latest_accepted_id = frame_id;
+    state.presented_pixel_width = @intCast(drawable.lease.extent.width);
+    state.presented_pixel_height = @intCast(drawable.lease.extent.height);
     noteMainRenderPublished(state, drawable.main_render_serial);
     return true;
 }
@@ -688,6 +706,8 @@ fn presentPending(
         presentDrawable(state, &drawable, buffer, pending.frame_id)
     else published: {
         state.latest_accepted_id = pending.frame_id;
+        state.presented_pixel_width = @intCast(drawable.lease.extent.width);
+        state.presented_pixel_height = @intCast(drawable.lease.extent.height);
         break :published true;
     };
     completion.published.store(@intFromBool(published), .release);
