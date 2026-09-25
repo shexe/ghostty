@@ -529,6 +529,11 @@ typedef struct {
   uint32_t cell_height_px;
 } ghostty_surface_size_s;
 
+typedef struct {
+  uint32_t width_px;
+  uint32_t height_px;
+} ghostty_surface_pixel_size_s;
+
 // Config types
 
 // config.Path
@@ -1195,6 +1200,7 @@ GHOSTTY_API void ghostty_surface_set_occlusion(ghostty_surface_t, bool);
 GHOSTTY_API void ghostty_surface_set_live_resizing(ghostty_surface_t, bool);
 GHOSTTY_API void ghostty_surface_set_size(ghostty_surface_t, uint32_t, uint32_t);
 GHOSTTY_API ghostty_surface_size_s ghostty_surface_size(ghostty_surface_t);
+GHOSTTY_API ghostty_surface_pixel_size_s ghostty_surface_last_presented_pixel_size(ghostty_surface_t);
 GHOSTTY_API void ghostty_surface_set_resize_lead(ghostty_surface_t, uint32_t);
 GHOSTTY_API uint64_t ghostty_surface_foreground_pid(ghostty_surface_t);
 GHOSTTY_API ghostty_string_s ghostty_surface_tty_name(ghostty_surface_t);
