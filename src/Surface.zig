@@ -2943,7 +2943,21 @@ pub fn keyCallback(
         }
 
         if (self.config.scroll_to_bottom.keystroke) {
-            self.io.terminal.scrollViewport(.bottom);
+            // Slide down to the bottom rather than jumping there. From more
+            // than a screen away the slide starts a screen above the bottom,
+            // so it never takes longer. Typing again mid-slide carries on.
+            if (self.renderer_state.scroll_slide == null) {
+                const bar = self.io.terminal.screens.active.pages.scrollbar();
+                const cell_h: f64 = @floatFromInt(self.size.cell.height);
+                const rows_below: f64 = @floatFromInt(bar.total -| bar.offset -| bar.len);
+                const screen: f64 = @as(f64, @floatFromInt(bar.len)) * cell_h;
+                const distance = @min(rows_below * cell_h + self.mouse.pending_scroll_y, screen);
+                if (distance > 0) {
+                    self.renderer_state.scroll_slide = .{ .distance_px = distance };
+                } else {
+                    self.io.terminal.scrollViewport(.bottom);
+                }
+            }
             self.mouse.momentum_cancelled = true;
         }
 
@@ -3580,6 +3594,17 @@ pub fn scrollCallback(
             if (self.mouse.momentum_cancelled) return;
         },
         .none, .may_begin => self.mouse.momentum_cancelled = false,
+    }
+
+    // Scrolling during a slide to the bottom stops it where it is and
+    // carries on from there.
+    {
+        self.renderer_state.mutex.lockUncancelable(global.io());
+        defer self.renderer_state.mutex.unlock(global.io());
+        if (self.renderer_state.scroll_slide != null) {
+            self.renderer_state.scroll_slide = null;
+            self.mouse.pending_scroll_y = self.renderer_state.mouse.pending_scroll_y;
+        }
     }
 
     const y: ScrollAmount = if (yoff == 0) .{} else y: {
@@ -5136,6 +5161,7 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
             self.renderer_state.mutex.lockUncancelable(global.io());
             defer self.renderer_state.mutex.unlock(global.io());
             self.renderer_state.mouse.pending_scroll_y = 0;
+            self.renderer_state.scroll_slide = null;
         },
 
         else => {},

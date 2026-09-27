@@ -33,6 +33,11 @@ preedit: ?Preedit = null,
 /// need about the mouse.
 mouse: Mouse = .{},
 
+/// A slide of the viewport down to the bottom, started by typing while
+/// scrolled back (see Surface.keyCallback). The renderer advances it every
+/// frame until it lands; any scroll cancels it.
+scroll_slide: ?ScrollSlide = null,
+
 /// The number of threads currently waiting to acquire `mutex` via
 /// `lockDemand`. This is not protected by the mutex; it is read by
 /// hot lock/unlock loops (the IO parse thread) in `yieldToDemand` to
@@ -158,6 +163,14 @@ pub fn scrollOffset(self: *const State) f64 {
 
     return pending;
 }
+
+pub const ScrollSlide = struct {
+    /// How far above the bottom the slide starts, in pixels.
+    distance_px: f64,
+
+    /// When the slide's first frame was prepared.
+    start: ?std.Io.Timestamp = null,
+};
 
 /// The pre-edit state. See Surface.preeditCallback for more information.
 pub const Preedit = struct {
