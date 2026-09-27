@@ -1,19 +1,19 @@
 # Ghostty, with smooth scrolling and seamless resize
 
-An unofficial fork of [Ghostty](https://ghostty.org) for macOS, built on
-Ghostty's `main` branch as of September 25, 2026
-([`6301810`](../../commit/6301810a48aaa3426887a4316668f18833a40138)). It is not
-affiliated with the Ghostty project.
+An unofficial fork of [Ghostty](https://ghostty.org) for macOS that follows
+Ghostty's `main` branch, rebased onto it daily.
+[`ghostty-main`](../../tree/ghostty-main) is the Ghostty commit it currently
+sits on. It is not affiliated with the Ghostty project.
 
 It combines three sets of changes, each kept on its own branch and merged into
 `main`:
 
 | Branch | Base | What it adds |
 | --- | --- | --- |
-| [`pixel-scroll`](../../compare/6301810a4...pixel-scroll) | Ghostty `main` | Smooth, sub-cell trackpad scrolling and more, by [Ian Kahn](https://github.com/lemur1905/ghostty-pixel-scroll), rebased onto current Ghostty. |
+| [`pixel-scroll`](../../compare/ghostty-main...pixel-scroll) | Ghostty `main` | Smooth, sub-cell trackpad scrolling and more, by [Ian Kahn](https://github.com/lemur1905/ghostty-pixel-scroll), rebased onto current Ghostty. |
 | [`scroll-fixes`](../../compare/pixel-scroll...scroll-fixes) | `pixel-scroll` | Two fixes to pixel scrolling. |
 | [`seamless-resize`](../../compare/pixel-scroll...seamless-resize) | `pixel-scroll` | Keeps the picture in step with a live window resize. |
-| [`kitty-streaming`](../../compare/6301810a4...kitty-streaming) | Ghostty `main` | Faster Kitty graphics for programs that stream video. |
+| [`kitty-streaming`](../../compare/ghostty-main...kitty-streaming) | Ghostty `main` | Faster Kitty graphics for programs that stream video. |
 
 ## Smooth scrolling
 
@@ -82,10 +82,20 @@ zig build -Doptimize=ReleaseFast -Demit-xcframework=true \
 
 ## Updating
 
-Each branch is a short series of commits on its base. When a base moves
-(Ghostty `main`, or lemur's `pixel-scroll`), rebase the branches that sit on
-it, using `--rebase-merges` for `seamless-resize` since it merges
-`scroll-fixes`, then merge them into `main` again.
+A daily workflow ([`sync-upstream.yml`](.github/workflows/sync-upstream.yml))
+runs [`.github/sync-upstream.sh`](.github/sync-upstream.sh), which replays
+`pixel-scroll` and `kitty-streaming` onto the latest Ghostty `main`, then
+`scroll-fixes`, `seamless-resize` and `main` onto the new `pixel-scroll`,
+redoing the merges with the conflict resolutions they already had. Commits keep
+their authors and dates. The workflow pushes only when the replay is
+conflict-free, the tests pass and every branch builds. Each replaced `main` is
+kept under `refs/archive/`, so a commit pinned elsewhere stays fetchable.
+Otherwise nothing is pushed and an issue is opened, and the branches are
+rebased by hand. The push needs a `SYNC_TOKEN` secret: a fine-grained token for
+this repository with Contents and Workflows write access.
+
+Ian Kahn's repository is not followed; new commits there are brought over by
+hand.
 
 `.githooks/pre-push` on `main` refuses pushes to anything but this repository.
 Run `git config core.hooksPath .githooks` once after cloning. The feature
