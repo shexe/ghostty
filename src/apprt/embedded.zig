@@ -1147,6 +1147,13 @@ pub const Surface = struct {
         };
     }
 
+    pub fn liveResizeCallback(self: *Surface, resizing: bool) void {
+        self.core_surface.liveResizeCallback(resizing) catch |err| {
+            log.err("error in live resize callback err={}", .{err});
+            return;
+        };
+    }
+
     fn queueInspectorRender(self: *Surface) void {
         _ = self.app.performAction(
             .{ .surface = &self.core_surface },
@@ -1509,6 +1516,12 @@ pub const CAPI = struct {
         cell_height_px: u32,
     };
 
+    // ghostty_surface_pixel_size_s
+    const SurfacePixelSize = extern struct {
+        width_px: u32,
+        height_px: u32,
+    };
+
     // ghostty_clipboard_content_s
     //
     // One representation of clipboard contents. The data is binary-safe
@@ -1702,9 +1715,11 @@ pub const CAPI = struct {
 
     export fn ghostty_app_free(v: *App) void {
         const core_app = v.core_app;
+        // Surface teardown drains GPU completions, which can still wake this
+        // runtime, so destroy the core app first.
+        core_app.destroy();
         v.terminate();
         global.alloc().destroy(v);
-        core_app.destroy();
     }
 
     /// Update the focused state of the app.
@@ -1957,6 +1972,22 @@ pub const CAPI = struct {
         surface.updateSize(w, h);
     }
 
+    /// Pixel size of the frame currently presented on screen. Unlike
+    /// `ghostty_surface_size`, this is what the user can actually see: the
+    /// requested surface size can run ahead of what has been drawn during a
+    /// resize.
+    export fn ghostty_surface_last_presented_pixel_size(surface: *Surface) SurfacePixelSize {
+        const size = surface.core_surface.renderer.api.layer.lastPresentedPixelSize();
+        return .{ .width_px = size.width, .height_px = size.height };
+    }
+
+    /// Set the resize lead, in backing pixels, for the next size request. The
+    /// host measures how fast a drag is moving and asks for a lead that covers
+    /// it; zero disables the lead.
+    export fn ghostty_surface_set_resize_lead(surface: *Surface, px: u32) void {
+        surface.core_surface.renderer.api.layer.setResizeLeadPx(px);
+    }
+
     /// Return the size information a surface has.
     export fn ghostty_surface_size(surface: *Surface) SurfaceSize {
         const grid_size = surface.core_surface.size.grid();
@@ -2006,6 +2037,11 @@ pub const CAPI = struct {
     /// Update the occlusion state of a surface.
     export fn ghostty_surface_set_occlusion(surface: *Surface, visible: bool) void {
         surface.occlusionCallback(visible);
+    }
+
+    /// Update whether the native surface is in an interactive resize.
+    export fn ghostty_surface_set_live_resizing(surface: *Surface, resizing: bool) void {
+        surface.liveResizeCallback(resizing);
     }
 
     /// Filter the mods if necessary. This handles settings such as

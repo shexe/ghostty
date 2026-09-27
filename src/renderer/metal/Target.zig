@@ -41,6 +41,9 @@ width: usize,
 /// Current height of this target.
 height: usize,
 
+/// Whether this target has been submitted for presentation.
+published: bool = false,
+
 pub fn init(opts: Options) !Self {
     // We set our surface's color space to Display P3.
     // This allows us to have "Apple-style" alpha blending,
@@ -58,6 +61,7 @@ pub fn init(opts: Options) !Self {
         .bytes_per_element = 4,
         .colorspace = colorspace,
     });
+    errdefer surface.release();
 
     // Create our descriptor
     const desc = init: {
@@ -103,6 +107,16 @@ pub fn init(opts: Options) !Self {
 }
 
 pub fn deinit(self: *Self) void {
-    self.surface.deinit();
+    // A pending presentation can still hold the IOSurface, so release our
+    // reference rather than purge its storage.
+    self.surface.release();
     self.texture.release();
+}
+
+pub fn requiresReplacement(self: *const Self) bool {
+    return self.published;
+}
+
+pub fn markPublished(self: *Self) void {
+    self.published = true;
 }

@@ -20,6 +20,7 @@ pub const Options = struct {};
 
 renderer: *Renderer,
 target: *Target,
+token: Renderer.FrameToken,
 
 /// Begin encoding a frame.
 pub fn begin(
@@ -29,12 +30,14 @@ pub fn begin(
     renderer: *Renderer,
     /// The target is presented via the provided renderer's API when completed.
     target: *Target,
+    token: Renderer.FrameToken,
 ) !Self {
     _ = opts;
 
     return .{
         .renderer = renderer,
         .target = target,
+        .token = token,
     };
 }
 
@@ -86,5 +89,5 @@ pub fn complete(self: *const Self, sync: bool) void {
     }
 
     // Report the health to the renderer.
-    self.renderer.frameCompleted(health);
+    self.renderer.frameCompleted(health, self.token);
 }

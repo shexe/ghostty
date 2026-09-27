@@ -1148,6 +1148,29 @@ const Subprocess = struct {
                 .ws_ypixel = std.math.cast(u16, screen_size.height) orelse std.math.maxInt(u16),
             });
         }
+
+        // The kernel only raises SIGWINCH when the pty size actually changes.
+        // We sometimes re-assert the same size to nudge a full-screen program
+        // whose signal handler was installed after the last real resize, so
+        // send the signal explicitly. This notifies without mutating the grid,
+        // which avoids any reflow/visual jitter.
+        self.signalWinch();
+    }
+
+    /// Send SIGWINCH to the child's process group, if we have one.
+    fn signalWinch(self: *Subprocess) void {
+        const pid = switch (self.process orelse return) {
+            .fork_exec => |cmd| cmd.pid orelse return,
+            .flatpak => return,
+        };
+        const pgid = getpgid(pid) orelse return;
+        switch (posix.errno(c.killpg(pgid, c.SIGWINCH))) {
+            .SUCCESS => {},
+            else => |err| log.debug(
+                "failed to send SIGWINCH pgid={} err={}",
+                .{ pgid, err },
+            ),
+        }
     }
 
     /// Kill the underlying subprocess. This sends a SIGHUP to the child

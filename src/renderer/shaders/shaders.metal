@@ -32,7 +32,13 @@ struct Uniforms {
   bool use_display_p3;
   bool use_linear_blending;
   bool use_linear_correction;
+  float4 grid_clip;
 };
+
+bool outside_grid_viewport(float2 position, constant Uniforms& uniforms) {
+  return any(position < uniforms.grid_clip.xy) ||
+         any(position >= uniforms.grid_clip.zw);
+}
 
 //-------------------------------------------------------------------
 // Color Functions
@@ -461,6 +467,8 @@ fragment float4 cell_bg_fragment(
   constant Uniforms& uniforms [[buffer(1)]],
   constant uchar4 *cells [[buffer(2)]]
 ) {
+  if (outside_grid_viewport(in.position.xy, uniforms)) return float4(0.0);
+  if (any(uniforms.grid_size == ushort2(0))) return float4(0.0);
   // Account for the sub-cell scroll translation of the grid: shift the
   // pixel coordinate up by the offset so the cell lookup matches the
   // visually translated grid.
@@ -715,6 +723,7 @@ fragment float4 cell_text_fragment(
   texture2d<float> textureColor [[texture(1)]],
   constant Uniforms& uniforms [[buffer(1)]]
 ) {
+  if (outside_grid_viewport(in.position.xy, uniforms)) discard_fragment();
   constexpr sampler textureSampler(
     coord::pixel,
     address::clamp_to_edge,
@@ -871,6 +880,7 @@ fragment float4 image_fragment(
   texture2d<float> image [[texture(0)]],
   constant Uniforms& uniforms [[buffer(1)]]
 ) {
+  if (outside_grid_viewport(in.position.xy, uniforms)) discard_fragment();
   constexpr sampler textureSampler(
     coord::pixel,
     address::clamp_to_edge,
@@ -887,4 +897,3 @@ fragment float4 image_fragment(
 
   return rgba;
 }
-

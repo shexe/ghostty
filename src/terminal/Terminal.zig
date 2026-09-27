@@ -4122,6 +4122,7 @@ pub fn resize(
                 .cols = opts.cols,
                 .rows = opts.rows,
                 .reflow = false,
+                .top_anchor = true,
                 .pull_scrollback = self.flags.resize_pull_scrollback,
             }) catch |err| break :resize err;
 

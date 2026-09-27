@@ -10,6 +10,7 @@ const inputpkg = @import("../input.zig");
 const os = @import("../os/main.zig");
 const terminal = @import("../terminal/main.zig");
 const renderer = @import("../renderer.zig");
+const sizepkg = @import("size.zig");
 const math = @import("../math.zig");
 const Surface = @import("../Surface.zig");
 const link = @import("link.zig");
@@ -43,7 +44,111 @@ const DisplayLink = switch (builtin.os.tag) {
     else => void,
 };
 
+const PendingHealth = struct {
+    latest: std.atomic.Value(Health) = .{ .raw = .healthy },
+    pending: std.atomic.Value(bool) = .{ .raw = false },
+
+    fn record(self: *PendingHealth, value: Health) bool {
+        if (self.latest.swap(value, .acq_rel) == value) return false;
+        self.pending.store(true, .release);
+        return true;
+    }
+
+    fn take(self: *PendingHealth) ?Health {
+        if (!self.pending.swap(false, .acq_rel)) return null;
+        return self.latest.load(.acquire);
+    }
+};
+
 const log = std.log.scoped(.generic_renderer);
+
+/// Which slots of a bounded frame pool are free. SwapChain synchronizes it.
+fn SlotAvailability(comptime count: usize) type {
+    return struct {
+        available: [count]bool = @splat(true),
+        next_hint: usize = 0,
+
+        fn claim(self: *@This()) ?usize {
+            for (0..count) |offset| {
+                const index = (self.next_hint + offset) % count;
+                if (!self.available[index]) continue;
+                self.available[index] = false;
+                self.next_hint = (index + 1) % count;
+                return index;
+            }
+            return null;
+        }
+
+        fn retire(self: *@This(), index: usize) bool {
+            if (index >= count or self.available[index]) return false;
+            self.available[index] = true;
+            return true;
+        }
+    };
+}
+
+/// Preserve the captured viewport, including glyph overhang and partial
+/// scroll rows, at the new grid origin. This never grows the visible domain
+/// of an old packet merely because its new render target is larger.
+fn capturedViewport(
+    prepared: renderer.Size,
+    padding: renderer.Padding,
+    width: u32,
+    height: u32,
+    texture_limit: u32,
+) [4]f32 {
+    const dx = @as(i64, padding.left) - @as(i64, prepared.padding.left);
+    const dy = @as(i64, padding.top) - @as(i64, prepared.padding.top);
+    return .{
+        @floatFromInt(std.math.clamp(dx, 0, width)),
+        @floatFromInt(std.math.clamp(dy, 0, height)),
+        @floatFromInt(std.math.clamp(dx + @as(i64, @min(prepared.screen.width, texture_limit)), 0, width)),
+        @floatFromInt(std.math.clamp(dy + @as(i64, @min(prepared.screen.height, texture_limit)), 0, height)),
+    };
+}
+
+const ProjectionBounds = struct {
+    left: f32,
+    right: f32,
+    bottom: f32,
+    top: f32,
+};
+
+/// Projection endpoints for a physical target. Compute the far edges from
+/// the signed origin and full target span so excessive padding on a tiny
+/// target cannot enlarge the projection and shrink the glyph pitch.
+fn projectionBounds(screen: renderer.ScreenSize, padding: renderer.Padding) ProjectionBounds {
+    const left = -@as(f32, @floatFromInt(padding.left));
+    const top = -@as(f32, @floatFromInt(padding.top));
+    return .{
+        .left = left,
+        .right = left + @as(f32, @floatFromInt(screen.width)),
+        .bottom = top + @as(f32, @floatFromInt(screen.height)),
+        .top = top,
+    };
+}
+
+/// Apply scroll metadata only as part of a successful cell rebuild.
+fn rebuildWithScrollState(
+    uniforms: anytype,
+    grid_offset_y: f32,
+    extra_below: bool,
+    extra_below2: bool,
+    extra_above: bool,
+    operation: anytype,
+) Allocator.Error!void {
+    const previous = uniforms.*;
+    uniforms.grid_offset_y = grid_offset_y;
+    uniforms.grid_extra_rows = .{
+        .below = extra_below,
+        .below2 = extra_below2,
+        .above = extra_above,
+    };
+    operation.run() catch |err| {
+        uniforms.* = previous;
+        return err;
+    };
+}
 
 /// Create a renderer type with the provided graphics API wrapper.
 ///
@@ -89,6 +194,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         const Self = @This();
 
         pub const API = GraphicsAPI;
+        pub const FrameToken = usize;
 
         pub const ExportedFrame = if (@hasDecl(GraphicsAPI, "ExportedFrame")) GraphicsAPI.ExportedFrame else void;
 
@@ -101,6 +207,21 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         const Sampler = GraphicsAPI.Sampler;
         const Texture = GraphicsAPI.Texture;
         const RenderPass = GraphicsAPI.RenderPass;
+        const ContinuationSlot = if (GraphicsAPI == renderer.Metal)
+            ?GraphicsAPI.Frame.SyncContinuation
+        else
+            void;
+        const DisplayLease = if (GraphicsAPI == renderer.Metal)
+            ?GraphicsAPI.DrawableLease
+        else
+            void;
+
+        /// Host padding policy and font identity. Drawing derives layout from
+        /// raw API bounds and this policy.
+        pub const PresentationGeometry = struct {
+            padding_policy: sizepkg.PaddingPolicy,
+            font_revision: u64,
+        };
 
         const shaderpkg = GraphicsAPI.shaders;
         const Shaders = shaderpkg.Shaders;
@@ -111,6 +232,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// This mutex must be held whenever any state used in `drawFrame` is
         /// being modified, and also when it's being accessed in `drawFrame`.
         draw_mutex: std.Io.Mutex = .init,
+
+        /// The latest host-published presentation geometry, behind its own
+        /// mutex so host layout never waits on draw_mutex (and GPU work).
+        presentation_mutex: std.Io.Mutex = .init,
+        presentation_geometry: PresentationGeometry,
 
         /// The configuration we need derived from the main config.
         config: DerivedConfig,
@@ -148,6 +274,32 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// scrollbar change.
         scrollbar: terminal.Scrollbar,
         scrollbar_dirty: bool,
+
+        /// Tracks whether the alternate screen was active on the last
+        /// frame. When this changes we notify the surface so it can apply
+        /// per-screen padding (full-bleed for full-screen TUIs).
+        last_screen_alt: bool = false,
+
+
+        /// The screen represented by the most recently prepared cell buffer.
+        /// This is updated only after a successful rebuild while draw_mutex is
+        /// held, so drawFrame never extends a stale primary-screen raster.
+        prepared_screen_alt: bool = false,
+        prepared_size: ?renderer.Size = null,
+        prepared_font_revision: u64 = 0,
+        /// Unlike size.padding, this is not overwritten by resize mailboxes.
+        /// It describes the origin of the last encoded frame.
+        last_draw_padding: ?renderer.Padding = null,
+
+        /// While set, we keep re-sending the screen-changed notification for a
+        /// short grace period after a screen switch. The surface turns that
+        /// into a resize (which sends SIGWINCH). Full-screen programs that
+        /// install their signal handlers a little late otherwise miss the
+        /// single initial notification and keep rendering at the old, smaller
+        /// grid size -- leaving a blank strip on the right and bottom.
+        resend_screen_alt: bool = false,
+        resend_screen_start: ?std.Io.Timestamp = null,
+        resend_screen_last: ?std.Io.Timestamp = null,
 
         /// Tracks the last bottom-right pin of the screen to detect new output.
         /// When the final line changes (node or y differs), new content was added.
@@ -194,6 +346,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
         /// The font structures.
         font_grid: *font.SharedGrid,
+        active_font_revision: u64 = 0,
         font_shaper: font.Shaper,
         font_shaper_cache: font.ShaperCache,
 
@@ -224,11 +377,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         display_link: ?DisplayLink = null,
 
         /// Health of the most recently completed frame.
-        health: std.atomic.Value(Health) = .{ .raw = .healthy },
+        health_updates: PendingHealth = .{},
 
         /// Health of how well the apprt can present our frames.
         ///
-        /// This is separate from `health` because a renderer
+        /// This is separate from `health_updates` because a renderer
         /// can produce healthy frames that the apprt can't present.
         presentation_health: std.atomic.Value(Health) = .{ .raw = .healthy },
 
@@ -297,11 +450,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             /// `buf_count` structs that can hold the
             /// data needed by the GPU to draw a frame.
             frames: [buf_count]FrameState,
-            /// Index of the most recently used frame state struct.
-            frame_index: std.math.IntFittingRange(0, buf_count) = 0,
             /// Semaphore that we wait on to make sure we have an available
             /// frame state struct so we can start working on a new frame.
             frame_sema: std.Io.Semaphore = .{ .permits = buf_count },
+            /// Exact slot ownership. The semaphore is always acquired before
+            /// this mutex, so no caller waits while holding the mutex.
+            slot_mutex: std.Io.Mutex = .init,
+            slots: SlotAvailability(buf_count) = .{},
 
             pub fn init(api: GraphicsAPI, custom_shaders: bool) !SwapChain {
                 var result: SwapChain = .{ .frames = undefined };
@@ -320,22 +475,40 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 for (0..buf_count) |_| self.frame_sema.waitUncancelable(
                     global.io(),
                 );
+                self.slot_mutex.lockUncancelable(global.io());
+                defer self.slot_mutex.unlock(global.io());
+                for (self.slots.available) |available|
+                    std.debug.assert(available);
                 for (&self.frames) |*frame| frame.deinit();
             }
 
             /// Get the next frame state to draw to. This will wait on the
             /// semaphore to ensure that the frame is available. This must
             /// always be paired with a call to releaseFrame.
-            pub fn nextFrame(self: *SwapChain) *FrameState {
+            pub fn nextFrame(self: *SwapChain) Lease {
                 self.frame_sema.waitUncancelable(global.io());
-                self.frame_index = (self.frame_index + 1) % buf_count;
-                return &self.frames[self.frame_index];
+                self.slot_mutex.lockUncancelable(global.io());
+                defer self.slot_mutex.unlock(global.io());
+                const token = self.slots.claim() orelse unreachable;
+                return .{ .frame = &self.frames[token], .token = token };
             }
 
             /// This should be called when the frame has completed drawing.
-            pub fn releaseFrame(self: *SwapChain) void {
+            pub fn releaseFrame(self: *SwapChain, token: FrameToken) void {
+                self.slot_mutex.lockUncancelable(global.io());
+                const retired = self.slots.retire(token);
+                self.slot_mutex.unlock(global.io());
+                if (!retired) {
+                    std.debug.assert(retired);
+                    return;
+                }
                 self.frame_sema.post(global.io());
             }
+
+            const Lease = struct {
+                frame: *FrameState,
+                token: FrameToken,
+            };
         };
 
         /// State we need duplicated for every frame. Any state that could be
@@ -727,10 +900,22 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 .surface_mailbox = options.surface_mailbox,
                 .grid_metrics = font_critical.metrics,
                 .size = options.size,
+                .presentation_geometry = .{
+                    .padding_policy = .{
+                        .explicit_padding_px = options.size.padding,
+                        .balance = .false,
+                        .screen_alt = false,
+                        .content_scale = .{ .x = 0, .y = 0 },
+                        .policy_available = false,
+                    },
+                    .font_revision = 0,
+                },
                 .focused = true,
                 .visible = true,
                 .scrollbar = .zero,
                 .scrollbar_dirty = false,
+                .last_screen_alt = false,
+                .prepared_screen_alt = false,
                 .last_bottom_node = null,
                 .last_bottom_y = 0,
                 .search_matches = null,
@@ -1279,12 +1464,17 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// Set the new font grid.
         ///
         /// Must be called on the render thread.
-        pub fn setFontGrid(self: *Self, grid: *font.SharedGrid) void {
+        pub fn setFontGrid(
+            self: *Self,
+            grid: *font.SharedGrid,
+            revision: u64,
+        ) void {
             self.draw_mutex.lockUncancelable(global.io());
             defer self.draw_mutex.unlock(global.io());
 
             // Update our grid
             self.font_grid = grid;
+            self.active_font_revision = revision;
 
             // Update all our textures so that they sync on the next frame.
             // We can modify this without a lock because the GPU does not
@@ -1322,6 +1512,34 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.markDirty();
         }
 
+        /// Publish the host's padding policy and font identity.
+        pub fn publishPresentationGeometry(
+            self: *Self,
+            padding_policy: sizepkg.PaddingPolicy,
+            font_revision: u64,
+        ) void {
+            self.presentation_mutex.lockUncancelable(global.io());
+            defer self.presentation_mutex.unlock(global.io());
+            self.presentation_geometry = .{
+                .padding_policy = padding_policy,
+                .font_revision = font_revision,
+            };
+        }
+
+        /// Publish the host's live-resize state to the presentation layer,
+        /// synchronously with the host callback.
+        pub fn setPresentationLiveResizing(self: *Self, resizing: bool) void {
+            if (comptime GraphicsAPI == renderer.Metal)
+                self.api.layer.setLiveResizing(resizing);
+        }
+
+        /// A snapshot of the latest host geometry.
+        pub fn presentationGeometry(self: *Self) PresentationGeometry {
+            self.presentation_mutex.lockUncancelable(global.io());
+            defer self.presentation_mutex.unlock(global.io());
+            return self.presentation_geometry;
+        }
+
         /// Update uniforms that are based on the font grid.
         ///
         /// Caller must hold the draw mutex.
@@ -1333,11 +1551,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         }
 
         /// Update the frame data.
+        /// Returns whether CPU cells were prepared.
         pub fn updateFrame(
             self: *Self,
             state: *renderer.State,
             cursor_blink_visible: bool,
-        ) Allocator.Error!void {
+        ) Allocator.Error!bool {
             // CoreText shaping accumulates objects for deferred release over
             // the course of a frame. Always flush those objects, including
             // when rebuilding the frame fails due to memory pressure.
@@ -1372,6 +1591,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 extra_below_visible: bool,
                 extra_below2_visible: bool,
                 extra_above_visible: bool,
+                screen_alt: bool,
+                size: ?renderer.Size,
             };
 
             // Update all our data as tightly as possible within the mutex.
@@ -1392,9 +1613,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // If we're in a synchronized output state, we pause all rendering.
                 if (state.terminal.modes.get(.synchronized_output)) {
                     log.debug("synchronized output started, skipping render", .{});
-                    return;
+                    return false;
                 }
-
                 // If scroll-to-bottom on output is enabled, check if the final line
                 // changed by comparing the bottom-right pin. If the node pointer or
                 // y offset changed, new content was added to the screen.
@@ -1552,6 +1772,8 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .extra_below_visible = extras_visible and overscan.below >= 1,
                     .extra_below2_visible = extras_visible and overscan.below >= 2,
                     .extra_above_visible = extras_visible and overscan.above >= 1,
+                    .screen_alt = state.terminal.screens.active_key == .alternate,
+                    .size = state.size,
                 };
             };
 
@@ -1559,6 +1781,45 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // within it. This must be done before anything reads the
             // render state (e.g. rebuildCells).
             self.terminal_state.endUpdate();
+
+            // If the active screen changed, notify the surface. It will
+            // reapply padding (full-bleed on the alternate screen) and
+            // relayout. Because the switch also changes the grid size, and
+            // some full-screen programs only install their SIGWINCH handler
+            // a moment after startup, we keep re-asserting the notification
+            // for a short grace period. Re-asserting the same size is
+            // harmless for programs that already handled it.
+            const now: std.Io.Timestamp = .now(global.io(), .awake);
+            if (critical.screen_alt != self.last_screen_alt) {
+                self.last_screen_alt = critical.screen_alt;
+                self.resend_screen_alt = critical.screen_alt;
+                self.resend_screen_start = now;
+                _ = self.surface_mailbox.push(.{
+                    .screen_changed = critical.screen_alt,
+                }, .forever);
+            } else if (self.resend_screen_start) |start| {
+                // Only re-assert while a full-screen program is active; the
+                // shell re-reads its size on its own and doesn't need the
+                // extra signals (which would make it redraw its prompt).
+                if (!self.resend_screen_alt or start.durationTo(now).toMilliseconds() > 2000) {
+                    // Grace period over.
+                    self.resend_screen_start = null;
+                    self.resend_screen_last = null;
+                } else {
+                    // Throttle to at most one re-assert every 150ms so we
+                    // don't spam SIGWINCH every rendered frame.
+                    const due = if (self.resend_screen_last) |last|
+                        last.durationTo(now).toMilliseconds() > 150
+                    else
+                        true;
+                    if (due) {
+                        self.resend_screen_last = now;
+                        _ = self.surface_mailbox.push(.{
+                            .screen_changed = self.resend_screen_alt,
+                        }, .forever);
+                    }
+                }
+            }
 
             // Outside the critical area we can update our links to contain
             // our regex results.
@@ -1622,9 +1883,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             // From this point forward no more errors.
             errdefer comptime unreachable;
+            var prepared = true;
 
-            // Reset our dirty state after updating.
-            defer self.terminal_state.dirty = .false;
+            // A failed cell allocation must be retried even if the terminal
+            // produces no further output. Its snapshot has already consumed
+            // the terminal's dirty flags, but has not reached the GPU cells.
+            defer self.terminal_state.dirty = if (prepared) .false else .full;
 
             // Rebuild the overlay image if we have one. We can do this
             // outside of any critical areas.
@@ -1647,29 +1911,52 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // rebuilding cells, since the rebuild uses them to decide
                 // whether the extra rows beyond the viewport edges need
                 // to be built.
-                self.uniforms.grid_offset_y = @floatCast(critical.scroll_offset);
-                self.uniforms.grid_extra_rows = .{
-                    .below = critical.extra_below_visible,
-                    .below2 = critical.extra_below2_visible,
-                    .above = critical.extra_above_visible,
-                };
+                const Rebuild = struct {
+                    renderer_self: *Self,
+                    preedit: ?renderer.State.Preedit,
+                    cursor_style: ?renderer.CursorStyle,
+                    links: *const terminal.RenderState.CellSet,
 
-                // Build our GPU cells
-                self.rebuildCells(
-                    critical.preedit,
-                    renderer.cursorStyle(&self.terminal_state, .{
-                        .preedit = critical.preedit != null,
-                        .focused = self.focused,
-                        .blink_visible = cursor_blink_visible,
-                    }),
-                    &critical.links,
+                    fn run(operation: @This()) Allocator.Error!void {
+                        try operation.renderer_self.rebuildCells(
+                            operation.preedit,
+                            operation.cursor_style,
+                            operation.links,
+                        );
+                    }
+                };
+                rebuildWithScrollState(
+                    &self.uniforms,
+                    @floatCast(critical.scroll_offset),
+                    critical.extra_below_visible,
+                    critical.extra_below2_visible,
+                    critical.extra_above_visible,
+                    Rebuild{
+                        .renderer_self = self,
+                        .preedit = critical.preedit,
+                        .cursor_style = renderer.cursorStyle(&self.terminal_state, .{
+                            .preedit = critical.preedit != null,
+                            .focused = self.focused,
+                            .blink_visible = cursor_blink_visible,
+                        }),
+                        .links = &critical.links,
+                    },
                 ) catch |err| {
                     // This means we weren't able to allocate our buffer
                     // to update the cells. In this case, we continue with
                     // our old buffer (frozen contents) and log it.
                     comptime assert(@TypeOf(err) == error{OutOfMemory});
                     log.warn("error rebuilding GPU cells err={}", .{err});
+                    prepared = false;
+                    // Keep the previous cells and their metadata intact.
+                    return false;
                 };
+
+                if (prepared) {
+                    self.prepared_screen_alt = critical.screen_alt;
+                    self.prepared_size = critical.size;
+                    self.prepared_font_revision = self.active_font_revision;
+                }
 
                 // The scrollbar is only emitted during draws so we also
                 // check the scrollbar cache here and update if needed.
@@ -1714,6 +2001,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             // Start the display link now that the rebuilt frame is ready.
             self.syncDisplayLink(null, null);
+            return prepared;
         }
 
         /// Draw the frame to the screen.
@@ -1724,33 +2012,65 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self: *Self,
             sync: bool,
         ) !void {
-            // Everything that touches draw state happens under the draw
-            // mutex. The display link is synced only after the mutex is
-            // released; see `syncDisplayLink` for why it must never be
-            // called with the draw mutex held.
-            const sync_display_link = locked: {
-                self.draw_mutex.lockUncancelable(global.io());
-                defer self.draw_mutex.unlock(global.io());
-                break :locked try self.drawFrameLocked(sync);
-            };
+            // During a live resize, hand the GPU draw of the frame prepared
+            // here to AppKit's display callback, so it lands in the same
+            // transaction as the window's new size.
+            if (comptime GraphicsAPI == renderer.Metal) {
+                if (!sync and self.api.handoffRendererDrawToNative()) return;
+            }
+            var drawable: DisplayLease = if (comptime GraphicsAPI == renderer.Metal)
+                null
+            else {};
+            if (try self.drawFrameInternal(sync, &drawable))
+                self.syncDisplayLink(null, null);
+        }
 
-            if (sync_display_link) self.syncDisplayLink(null, null);
+        /// Draw from the main-thread Metal display callback, presenting through
+        /// `drawable` when it is set. Ordinary bounds changes render captured
+        /// cells into the current target at fixed pitch, clipped to their
+        /// captured viewport. The display link is never resynced here: that
+        /// belongs on the render thread.
+        pub fn drawFrameDisplayCallback(
+            self: *Self,
+            sync: bool,
+            drawable: *DisplayLease,
+        ) !void {
+            _ = try self.drawFrameInternal(sync, drawable);
+        }
+
+        /// Draw under the draw mutex, then finish a synchronous frame after
+        /// releasing it. Returns whether the display link should be resynced.
+        fn drawFrameInternal(
+            self: *Self,
+            sync: bool,
+            drawable: *DisplayLease,
+        ) !bool {
+            var continuation: ContinuationSlot = if (comptime GraphicsAPI == renderer.Metal)
+                null
+            else {};
+            defer if (comptime GraphicsAPI == renderer.Metal) {
+                if (continuation) |*value| value.finish();
+            };
+            self.draw_mutex.lockUncancelable(global.io());
+            defer self.draw_mutex.unlock(global.io());
+            return try self.drawFrameLocked(sync, &continuation, drawable);
         }
 
         /// The body of `drawFrame`. Must be called with `draw_mutex` held.
         ///
         /// Returns true if the display link should be resynced once the
         /// draw mutex is released. This is only ever true on the no-redraw
-        /// path, which a sync draw never takes, so the main thread's sync
-        /// draws never touch the display link and `syncDisplayLink` stays
-        /// on the render thread.
+        /// path, which a sync draw never takes.
         fn drawFrameLocked(
             self: *Self,
             sync: bool,
+            continuation: *ContinuationSlot,
+            drawable: *DisplayLease,
         ) !bool {
             // After the graphics API is complete (so we defer) we want to
             // update our scrollbar state.
-            defer if (self.scrollbar_dirty) {
+            var update_scrollbar = true;
+            defer if (update_scrollbar and self.scrollbar_dirty) {
                 // Fail instantly if the surface mailbox if full, we'll just
                 // get it on the next frame.
                 if (self.surface_mailbox.push(.{
@@ -1763,8 +2083,49 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.api.drawFrameStart();
             defer self.api.drawFrameEnd();
 
-            // Retrieve the most up-to-date surface size from the Graphics API
-            const surface_size = try self.api.surfaceSize();
+            // Read physical geometry once. The target follows the layer, while
+            // cell indexing and font resources remain with the prepared cells.
+            const surface_geometry = if (comptime GraphicsAPI == renderer.Metal)
+                try self.api.surfaceGeometry()
+            else {};
+            const surface_size = if (comptime GraphicsAPI == renderer.Metal) .{
+                .width = @min(surface_geometry.size.width, self.api.max_texture_size),
+                .height = @min(surface_geometry.size.height, self.api.max_texture_size),
+            } else try self.api.surfaceSize();
+            var draw_padding = self.size.padding;
+            var grid_clip: [4]f32 = .{ 0, 0, @floatFromInt(surface_size.width), @floatFromInt(surface_size.height) };
+            var packet_geometry_matches = true;
+            if (comptime GraphicsAPI == renderer.Metal) {
+                const host = self.presentationGeometry();
+                const policy = host.padding_policy;
+                if (self.prepared_size) |prepared| {
+                    const compatible = policy.policy_available and
+                        host.font_revision == self.active_font_revision and
+                        self.prepared_font_revision == self.active_font_revision and
+                        prepared.cell.width == self.grid_metrics.cell_width and
+                        prepared.cell.height == self.grid_metrics.cell_height and
+                        policy.screen_alt == self.prepared_screen_alt and
+                        policy.content_scale.x == surface_geometry.content_scale.x and
+                        policy.content_scale.y == surface_geometry.content_scale.y;
+                    if (!compatible) {
+                        update_scrollbar = false;
+                        return false;
+                    }
+                    var layout: renderer.Size = .{
+                        .screen = surface_geometry.size,
+                        .cell = .{ .width = self.grid_metrics.cell_width, .height = self.grid_metrics.cell_height },
+                        .padding = .{},
+                    };
+                    policy.apply(&layout);
+                    draw_padding = layout.padding;
+                    grid_clip = capturedViewport(prepared, draw_padding, surface_size.width, surface_size.height, self.api.max_texture_size);
+                    packet_geometry_matches =
+                        @min(prepared.screen.width, self.api.max_texture_size) == surface_size.width and
+                        @min(prepared.screen.height, self.api.max_texture_size) == surface_size.height and
+                        prepared.padding.left == draw_padding.left and
+                        prepared.padding.top == draw_padding.top;
+                }
+            }
 
             // If either of our surface dimensions is zero
             // then drawing is absurd, so we just return.
@@ -1791,7 +2152,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             const size_changed =
                 self.size.screen.width != surface_size.width or
-                self.size.screen.height != surface_size.height;
+                self.size.screen.height != surface_size.height or
+                self.last_draw_padding == null or
+                !std.meta.eql(self.last_draw_padding.?, draw_padding);
 
             // Conditions under which we need to draw the frame, otherwise we
             // don't need to since the previous frame should be identical.
@@ -1812,11 +2175,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 return true;
             }
             self.cells_rebuilt = false;
+            errdefer self.cells_rebuilt = true;
 
             // Wait for a frame to be available.
-            const frame = swap_chain.nextFrame();
-            errdefer swap_chain.releaseFrame();
-            // log.debug("drawing frame index={}", .{swap_chain.frame_index});
+            const lease = swap_chain.nextFrame();
+            const frame = lease.frame;
+            var lease_owned = true;
+            errdefer if (lease_owned) swap_chain.releaseFrame(lease.token);
 
             // If we need to reinitialize our shaders, do so.
             if (self.reinitialize_shaders) {
@@ -1847,6 +2212,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             // If our stored size doesn't match the
             // surface size we need to update it.
+            // Restore selected padding even when a stale mailbox overwrote
+            // it after the last frame at this same physical geometry.
+            self.size.padding = draw_padding;
             if (size_changed) {
                 self.size.screen = .{
                     .width = surface_size.width,
@@ -1854,11 +2222,19 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 };
                 self.updateScreenSizeUniforms();
             }
+            // The target projection uses current geometry, independently of
+            // the captured grid stride and cell metrics.
+            if (comptime GraphicsAPI == renderer.Metal) self.updateScreenSizeUniforms();
 
             // If this frame's target isn't the correct size, or the target
             // config has changed (such as when the blending mode changes),
             // remove it and replace it with a new one with the right values.
-            if (frame.target.width != self.size.screen.width or
+            const target_published = if (comptime @hasDecl(Target, "requiresReplacement"))
+                frame.target.requiresReplacement()
+            else
+                false;
+            if (target_published or
+                frame.target.width != self.size.screen.width or
                 frame.target.height != self.size.screen.height or
                 frame.target_config_modified != self.target_config_modified)
             {
@@ -1880,7 +2256,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             try self.updateCustomShaderUniformsForFrame();
 
             // Setup our frame data
-            try frame.uniforms.sync(&.{self.uniforms});
+            var draw_uniforms = self.uniforms;
+            if (comptime GraphicsAPI == renderer.Metal) draw_uniforms.grid_clip = grid_clip;
+
+            try frame.uniforms.sync(&.{draw_uniforms});
             try frame.cells_bg.sync(self.cells.bg_cells);
             const fg_count = try frame.cells.syncFromArrayLists(self.cells.fg_rows);
 
@@ -1909,9 +2288,26 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 try self.syncAtlasTexture(&self.font_grid.atlas_color, &frame.color);
             }
 
+            // The last fallible upload, kept before beginFrame so a failure
+            // never has to unwind a command buffer.
+            if (frame.custom_shader_state) |*state| {
+                try state.uniforms.sync(&.{self.custom_shader_uniforms});
+            }
+
+            // A submitted target may still be waiting for presentation, so it
+            // is replaced rather than redrawn next time.
+            if (comptime @hasDecl(Target, "markPublished")) frame.target.markPublished();
+
             // Get a frame context from the graphics API.
-            var frame_ctx = try self.api.beginFrame(self, &frame.target);
-            defer frame_ctx.complete(sync);
+            var frame_ctx = if (comptime GraphicsAPI == renderer.Metal)
+                try self.api.beginFrame(self, &frame.target, lease.token, drawable)
+            else
+                try self.api.beginFrame(self, &frame.target, lease.token);
+            lease_owned = false;
+            var frame_ctx_owned = true;
+            errdefer if (comptime GraphicsAPI == renderer.Metal) {
+                if (frame_ctx_owned) frame_ctx.abort();
+            };
 
             {
                 var pass = frame_ctx.renderPass(&.{.{
@@ -2016,9 +2412,6 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             // If we have custom shaders, then we render them.
             if (frame.custom_shader_state) |*state| {
-                // Sync our uniforms.
-                try state.uniforms.sync(&.{self.custom_shader_uniforms});
-
                 for (self.shaders.post_pipelines, 0..) |pipeline, i| {
                     defer state.swap();
 
@@ -2044,6 +2437,47 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 }
             }
 
+            // Full-bleed alternate-screen content can contain foreground-only
+            // pixels (such as plasma), so a background-only extension leaves
+            // its padding blank. Metal can copy the completed edge raster into
+            // the fitted remainder without changing the grid or its shaders.
+            if (comptime @hasDecl(@TypeOf(frame_ctx), "extendRasterEdges")) {
+                const cell_width: usize = self.grid_metrics.cell_width;
+                const cell_height: usize = self.grid_metrics.cell_height;
+                const grid_width = @as(usize, self.cells.size.columns) * cell_width;
+                const grid_height = @as(usize, self.cells.size.rows) * cell_height;
+                const grid_rect: @TypeOf(frame_ctx).GridRect = .{
+                    .x = self.size.padding.left,
+                    .y = self.size.padding.top,
+                    .width = grid_width,
+                    .height = grid_height,
+                };
+
+                const clip_contains_grid =
+                    @as(f32, @floatFromInt(grid_rect.x)) >= grid_clip[0] and
+                    @as(f32, @floatFromInt(grid_rect.y)) >= grid_clip[1] and
+                    @as(f32, @floatFromInt(grid_rect.x + grid_rect.width)) <= grid_clip[2] and
+                    @as(f32, @floatFromInt(grid_rect.y + grid_rect.height)) <= grid_clip[3];
+                const safe_captured_edge = packet_geometry_matches or
+                    (clip_contains_grid and self.uniforms.grid_offset_y == 0 and
+                        @as(u8, @bitCast(self.uniforms.grid_extra_rows)) == 0);
+                if (self.prepared_screen_alt and safe_captured_edge and
+                    self.config.padding_color == .@"extend-always" and
+                    grid_rect.isFittedWithin(
+                        frame.target.width,
+                        frame.target.height,
+                        cell_width,
+                        cell_height,
+                    )) frame_ctx.extendRasterEdges(&frame.target, grid_rect);
+            }
+
+            self.last_draw_padding = draw_padding;
+            if (comptime GraphicsAPI == renderer.Metal) {
+                continuation.* = try frame_ctx.complete(sync);
+                frame_ctx_owned = false;
+            } else {
+                frame_ctx.complete(sync);
+            }
             return false;
         }
 
@@ -2051,24 +2485,42 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         pub fn frameCompleted(
             self: *Self,
             health: Health,
+            token: FrameToken,
         ) void {
-            // If our health value hasn't changed, then we do nothing. We don't
-            // do a cmpxchg here because strict atomicity isn't important.
-            if (self.health.load(.seq_cst) != health) {
-                self.health.store(health, .seq_cst);
+            const changed = self.health_updates.record(health);
+            const rt_app = if (changed) self.surface_mailbox.app.rt_app else null;
+            // Wake while the slot still pins the renderer; releasing the slot
+            // is this completion's last renderer access.
+            if (rt_app) |app| app.wakeup();
+            self.swap_chain.?.releaseFrame(token);
+        }
 
-                // Our health value changed, so we notify the surface so that it
-                // can do something about it.
-                _ = self.surface_mailbox.push(.{
-                    .renderer_health = health,
-                }, .{ .forever = {} });
-            }
+        /// Return an uncommitted frame slot without publishing a health
+        /// transition or waking the app while draw_mutex is held.
+        pub fn abortFrame(self: *Self, token: FrameToken) void {
+            self.swap_chain.?.releaseFrame(token);
+        }
 
-            // Always release our semaphore. The swap chain is
-            // guaranteed to exist here: it is only torn down after
-            // waiting for all in-flight frames to complete, and this
-            // callback is what signals that completion.
-            self.swap_chain.?.releaseFrame();
+        /// Synchronous Metal completion runs on the main thread, where a wakeup
+        /// can tick the app inline and tear the surface down. Release the slot
+        /// first; nothing may touch the renderer after that.
+        pub fn frameCompletedMetal(
+            self: *Self,
+            health: Health,
+            token: FrameToken,
+            sync: bool,
+        ) void {
+            if (!sync) return self.frameCompleted(health, token);
+
+            const changed = self.health_updates.record(health);
+            const rt_app = if (changed) self.surface_mailbox.app.rt_app else null;
+            self.swap_chain.?.releaseFrame(token);
+            if (rt_app) |app| app.wakeup();
+        }
+
+        /// Consume the latest renderer-health transition without blocking.
+        pub fn takePendingHealth(self: *Self) ?Health {
+            return self.health_updates.take();
         }
 
         /// Call this any time the background image path changes.
@@ -2237,7 +2689,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             if (blending_changed) {
                 // We update our API's blending mode.
-                self.api.blending = config.blending;
+                if (comptime GraphicsAPI == renderer.Metal)
+                    self.api.setBlending(config.blending)
+                else
+                    self.api.blending = config.blending;
                 // And indicate that we need to reinitialize our shaders.
                 self.reinitialize_shaders = true;
                 // And indicate that our swap chain targets need to
@@ -2274,8 +2729,6 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         ///
         /// Caller must hold the draw mutex.
         fn updateScreenSizeUniforms(self: *Self) void {
-            const terminal_size = self.size.terminal();
-
             // Blank space around the grid.
             const blank: renderer.Padding = self.size.screen.blankPadding(
                 self.size.padding,
@@ -2290,11 +2743,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             ).add(self.size.padding);
 
             // Setup our uniforms
+            const projection = projectionBounds(self.size.screen, self.size.padding);
             self.uniforms.projection_matrix = math.ortho2d(
-                -1 * @as(f32, @floatFromInt(self.size.padding.left)),
-                @floatFromInt(terminal_size.width + self.size.padding.right),
-                @floatFromInt(terminal_size.height + self.size.padding.bottom),
-                -1 * @as(f32, @floatFromInt(self.size.padding.top)),
+                projection.left,
+                projection.right,
+                projection.bottom,
+                projection.top,
             );
             self.uniforms.grid_padding = .{
                 @floatFromInt(blank.top),
@@ -2653,6 +3107,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // Update our uniforms accordingly, otherwise
                 // our background cells will be out of place.
                 self.uniforms.grid_size = .{ new_size.columns, new_size.rows };
+
+                // Padding depends on the cell size too.
+                self.updateScreenSizeUniforms();
             }
 
             const rebuild = state.dirty == .full or grid_size_diff;
