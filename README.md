@@ -5,14 +5,14 @@ Ghostty's `main` branch, rebased onto it daily.
 [`ghostty-main`](../../tree/ghostty-main) is the Ghostty commit it currently
 sits on. It is not affiliated with the Ghostty project.
 
-It combines three sets of changes, each kept on its own branch and merged into
-`main`:
+It combines these changes, each kept on its own branch and merged into `main`:
 
 | Branch | Base | What it adds |
 | --- | --- | --- |
 | [`pixel-scroll`](../../compare/ghostty-main...pixel-scroll) | Ghostty `main` | Smooth, sub-cell trackpad scrolling and more, by [Ian Kahn](https://github.com/lemur1905/ghostty-pixel-scroll), rebased onto current Ghostty. |
 | [`scroll-fixes`](../../compare/pixel-scroll...scroll-fixes) | `pixel-scroll` | Fixes to pixel scrolling, and a slide to the bottom when you type. |
 | [`seamless-resize`](../../compare/pixel-scroll...seamless-resize) | `pixel-scroll` | Keeps the picture in step with a live window resize. |
+| [`region-scroll`](../../compare/pixel-scroll...region-scroll) | `pixel-scroll` | Animates scroll-region scrolls in full-screen apps, by [Ethan Lee](https://github.com/thdxg/ghostty) (thdxg). |
 | [`kitty-streaming`](../../compare/ghostty-main...kitty-streaming) | Ghostty `main` | Faster Kitty graphics for programs that stream video. |
 
 ## Smooth scrolling
@@ -63,6 +63,22 @@ The embedding API gains three calls for hosts: `ghostty_surface_set_live_resizin
 `ghostty_surface_last_presented_pixel_size` (the size of the frame actually on
 screen).
 
+## Region scroll animation
+
+Full-screen programs draw on the alternate screen, which has no scrollback for
+pixel scrolling to move. Some of them scroll by asking the terminal to shift a
+region of rows with its scroll margins (DECSTBM and DECSLRM with SU/SD, or a
+line feed at the bottom margin); Claude Code's full-screen view and `less` do.
+`region-scroll` animates those shifts: the region's new content starts where
+the old content was and eases into place in about a quarter second, and the
+rows that scrolled out slide away with it, clipped to the region. A trackpad
+swipe, which sends many one-row scrolls, reads as one motion.
+
+Programs that repaint every cell instead, such as Codex's full-screen view,
+look the same as before, and the scrollback's pixel scrolling is unaffected.
+The motion follows each scroll rather than the fingers, since the program only
+draws the next row once it has scrolled.
+
 ## Kitty graphics streaming
 
 Programs such as `mpv --vo=kitty` play video by sending a new image every
@@ -89,8 +105,9 @@ zig build -Doptimize=ReleaseFast -Demit-xcframework=true \
 A daily workflow ([`sync-upstream.yml`](.github/workflows/sync-upstream.yml))
 runs [`.github/sync-upstream.sh`](.github/sync-upstream.sh), which replays
 `pixel-scroll` and `kitty-streaming` onto the latest Ghostty `main`, then
-`scroll-fixes`, `seamless-resize` and `main` onto the new `pixel-scroll`,
-redoing the merges with the conflict resolutions they already had. Commits keep
+`scroll-fixes`, `seamless-resize`, `region-scroll` and `main` onto the new
+`pixel-scroll`, redoing the merges with the conflict resolutions they already
+had. Commits keep
 their authors and dates. The workflow pushes only when the replay is
 conflict-free, the tests pass and every branch builds. Each replaced `main` is
 kept under `refs/archive/`, so a commit pinned elsewhere stays fetchable.
@@ -98,8 +115,8 @@ Otherwise nothing is pushed and an issue is opened, and the branches are
 rebased by hand. The push needs a `SYNC_TOKEN` secret: a fine-grained token for
 this repository with Contents and Workflows write access.
 
-Ian Kahn's repository is not followed; new commits there are brought over by
-hand.
+Ian Kahn's and Ethan Lee's repositories are not followed; new commits there are
+brought over by hand.
 
 `.githooks/pre-push` on `main` refuses pushes to anything but this repository.
 Run `git config core.hooksPath .githooks` once after cloning. The feature
@@ -112,6 +129,8 @@ branches don't carry the hook, so push them while `main` is checked out.
 - Smooth scrolling, Option-click, wrapped links and the compose box
   (`pixel-scroll`) by [Ian Kahn](https://github.com/lemur1905), adapting a
   proof of concept by [@pfgithub](https://github.com/pfgithub).
+- Region scroll animation (`region-scroll`) by [Ethan Lee](https://github.com/thdxg),
+  from his [Ghostty fork](https://github.com/thdxg/ghostty).
 - Scroll fixes, seamless resize and Kitty streaming by
   [shexe](https://github.com/shexe).
 
