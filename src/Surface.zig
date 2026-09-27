@@ -249,6 +249,12 @@ const Mouse = struct {
     pending_scroll_x: f64 = 0,
     pending_scroll_y: f64 = 0,
 
+    /// Set when typing jumps the viewport to the bottom. A trackpad fling
+    /// that was still gliding keeps sending momentum events, which would
+    /// scroll the viewport straight back up, so the rest of its momentum
+    /// is ignored. The next scroll the user actually makes clears it.
+    momentum_cancelled: bool = false,
+
     /// True if the mouse is hidden
     hidden: bool = false,
 
@@ -2936,7 +2942,10 @@ pub fn keyCallback(
             try self.setSelection(null);
         }
 
-        if (self.config.scroll_to_bottom.keystroke) self.io.terminal.scrollViewport(.bottom);
+        if (self.config.scroll_to_bottom.keystroke) {
+            self.io.terminal.scrollViewport(.bottom);
+            self.mouse.momentum_cancelled = true;
+        }
 
         // Typing resets any sub-cell scroll offset so the prompt row
         // isn't rendered partially clipped at the viewport edge.
@@ -3563,6 +3572,15 @@ pub fn scrollCallback(
 
     // Always show the mouse again if it is hidden
     if (self.mouse.hidden) self.showMouse();
+
+    // Drop the rest of a fling that typing cancelled. Anything other than
+    // momentum is the user scrolling again.
+    switch (scroll_mods.momentum) {
+        .began, .stationary, .changed, .ended, .cancelled => {
+            if (self.mouse.momentum_cancelled) return;
+        },
+        .none, .may_begin => self.mouse.momentum_cancelled = false,
+    }
 
     const y: ScrollAmount = if (yoff == 0) .{} else y: {
         // We use cell_size to determine if we have accumulated enough to trigger a scroll
