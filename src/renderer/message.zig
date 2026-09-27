@@ -31,6 +31,7 @@ pub const Message = union(enum) {
     font_grid: struct {
         grid: *font.SharedGrid,
         set: *font.SharedGridSet,
+        revision: u64,
 
         // The key for the new grid. If adopting the new grid fails for any
         // reason, the old grid should be kept but the new key should be
@@ -44,6 +45,9 @@ pub const Message = union(enum) {
 
     /// Changes the size. The screen size might change, padding, grid, etc.
     resize: renderer.Size,
+
+    /// The native surface is entering or leaving an interactive resize.
+    live_resizing: bool,
 
     /// The derived configuration to update the renderer with.
     change_config: struct {

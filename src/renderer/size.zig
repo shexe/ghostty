@@ -1,6 +1,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const terminal_size = @import("../terminal/size.zig");
+const ContentScale = @import("../apprt/structs.zig").ContentScale;
 
 const log = std.log.scoped(.renderer_size);
 
@@ -74,6 +75,28 @@ pub const Size = struct {
                 self.padding.top -= vshift;
                 self.padding.bottom += vshift;
             },
+        }
+    }
+};
+
+/// The host's padding inputs at one content scale, so the renderer can pad any
+/// backing size the way the host would.
+pub const PaddingPolicy = struct {
+    explicit_padding_px: Padding,
+    balance: PaddingBalance,
+    screen_alt: bool,
+    content_scale: ContentScale,
+    policy_available: bool,
+
+    /// Apply this policy to a size. The alternate screen is full-bleed; an
+    /// unavailable policy falls back to no padding.
+    pub fn apply(self: PaddingPolicy, size: *Size) void {
+        if (!self.policy_available or self.screen_alt) {
+            size.padding = .{};
+        } else if (self.balance != .false) {
+            size.balancePadding(self.explicit_padding_px, self.balance);
+        } else {
+            size.padding = self.explicit_padding_px;
         }
     }
 };

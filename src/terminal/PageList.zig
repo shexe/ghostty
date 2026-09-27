@@ -1230,6 +1230,12 @@ pub const Resize = struct {
     /// be truncated if the new size is smaller than the old size.
     reflow: bool = true,
 
+    /// Keep the top of the active area fixed when shrinking rows without
+    /// reflow. Rows removed from the bottom are discarded instead of becoming
+    /// history. This is used by alternate-screen buffers, whose applications
+    /// redraw in response to the new size.
+    top_anchor: bool = false,
+
     /// Set this to the current cursor position in the active area. Some
     /// resize/reflow behavior depends on the cursor position.
     cursor: ?Cursor = null,
@@ -2865,22 +2871,27 @@ fn resizeWithoutReflow(self: *PageList, opts: Resize) Allocator.Error!void {
             // the row size doesn't affect anything else since max size and
             // so on are all byte-based.
             .lt => {
-                // If our rows are shrinking, we prefer to trim trailing
-                // blank lines from the active area instead of creating
-                // history if we can.
-                //
-                // This matches macOS Terminal.app behavior. I chose to match that
-                // behavior because it seemed fine in an ocean of differing behavior
-                // between terminal apps. I'm completely open to changing it as long
-                // as resize behavior isn't regressed in a user-hostile way.
-                const trimmed = self.trimTrailingBlankRows(self.rows - rows);
+                if (opts.top_anchor) {
+                    self.truncateTailRows(self.rows - rows);
+                    self.rows = rows;
+                } else {
+                    // If our rows are shrinking, we prefer to trim trailing
+                    // blank lines from the active area instead of creating
+                    // history if we can.
+                    //
+                    // This matches macOS Terminal.app behavior. I chose to match that
+                    // behavior because it seemed fine in an ocean of differing behavior
+                    // between terminal apps. I'm completely open to changing it as long
+                    // as resize behavior isn't regressed in a user-hostile way.
+                    const trimmed = self.trimTrailingBlankRows(self.rows - rows);
 
-                // Account for our trimmed rows in the total row cache
-                self.total_rows -= trimmed;
+                    // Account for our trimmed rows in the total row cache
+                    self.total_rows -= trimmed;
 
-                // If we didn't trim enough, just modify our row count and this
-                // will create additional history.
-                self.rows = rows;
+                    // If we didn't trim enough, just modify our row count and this
+                    // will create additional history.
+                    self.rows = rows;
+                }
             },
 
             // Making rows larger we adjust our row count, and then grow
@@ -2951,6 +2962,66 @@ fn resizeWithoutReflow(self: *PageList, opts: Resize) Allocator.Error!void {
             assert(self.totalRows() >= self.rows);
         }
     }
+}
+
+/// Remove physical rows from the bottom of the pagelist. Tracked pins in the
+/// discarded rows are clamped to the last retained row so cursors, selections,
+/// and image placements remain valid.
+fn truncateTailRows(self: *PageList, count: size.CellCountInt) void {
+    assert(count > 0);
+    assert(count < self.rows);
+    assert(count < self.total_rows);
+
+    const retained = self.getBottomRight(.screen).?.up(count).?;
+
+    // A wide character that wrapped onto the first discarded row leaves a
+    // spacer head at the retained boundary. Clear the incomplete character.
+    const retained_rac = retained.rowAndCell();
+    if (retained_rac.cell.wide == .spacer_head) {
+        retained.node.page().clearCells(
+            retained_rac.row,
+            retained.x,
+            retained.x + 1,
+        );
+    }
+    retained_rac.row.wrap = false;
+    retained_rac.row.dirty = true;
+
+    // Move every pin in the discarded tail before freeing any page storage.
+    // Column resizing happens first, so each x value is already clamped.
+    for (self.tracked_pins.keys()) |p| {
+        if (!retained.before(p.*)) continue;
+        p.node = retained.node;
+        p.y = retained.y;
+        p.x = @min(p.x, retained.node.page().size.cols - 1);
+    }
+
+    var remaining: usize = count;
+    while (remaining > 0) {
+        const node = self.pages.last.?;
+        const page = node.page();
+        const remove_count = @min(remaining, page.size.rows);
+        const first_removed = page.size.rows - remove_count;
+        const page_rows = page.rows.ptr(page.memory);
+
+        // Retired row storage is reused as-is when the page grows again, so
+        // leave it in the default state.
+        for (page_rows[first_removed..page.size.rows]) |*row| page.resetRow(row);
+
+        remaining -= remove_count;
+        if (first_removed == 0) {
+            // At least one retained row exists, so removing this page cannot
+            // empty the list.
+            self.erasePage(node);
+        } else {
+            // Shrinking a retained page changes its valid row-coordinate range.
+            self.invalidateNodeLayout(node);
+            page.size.rows = first_removed;
+            page.assertIntegrity();
+        }
+    }
+
+    self.total_rows -= count;
 }
 
 fn resizeWithoutReflowGrowCols(
