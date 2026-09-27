@@ -121,6 +121,11 @@ pub const Message = union(enum) {
     /// unless the surface exits.
     password_input: bool,
 
+    /// The terminal switched between the primary and alternate screens.
+    /// The bool is true when the alternate screen is now active. This is
+    /// used to apply per-screen padding (full-bleed for full-screen TUIs).
+    screen_changed: bool,
+
     /// A terminal color was changed using OSC sequences.
     color_change: terminal.osc.color.ColoredTarget,
 

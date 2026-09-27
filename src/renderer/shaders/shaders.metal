@@ -32,7 +32,13 @@ struct Uniforms {
   bool use_display_p3;
   bool use_linear_blending;
   bool use_linear_correction;
+  float4 grid_clip;
 };
+
+bool outside_grid_viewport(float2 position, constant Uniforms& uniforms) {
+  return any(position < uniforms.grid_clip.xy) ||
+         any(position >= uniforms.grid_clip.zw);
+}
 
 //-------------------------------------------------------------------
 // Color Functions
@@ -461,6 +467,8 @@ fragment float4 cell_bg_fragment(
   constant Uniforms& uniforms [[buffer(1)]],
   constant uchar4 *cells [[buffer(2)]]
 ) {
+  if (outside_grid_viewport(in.position.xy, uniforms)) return float4(0.0);
+  if (any(uniforms.grid_size == ushort2(0))) return float4(0.0);
   // Account for the sub-cell scroll translation of the grid: shift the
   // pixel coordinate up by the offset so the cell lookup matches the
   // visually translated grid.
@@ -490,7 +498,9 @@ fragment float4 cell_bg_fragment(
   // grid_size.y and grid_size.y + 1 (natural positions) and the row
   // above at grid_size.y + 2.
   if (grid_pos.y < 0) {
-    if (grid_pos.y == -1 && (uniforms.grid_extra_rows & EXTRA_ABOVE)) {
+    if (grid_pos.y == -1 &&
+        (uniforms.grid_extra_rows & EXTRA_ABOVE) &&
+        in.position.y >= uniforms.grid_padding.x) {
       grid_pos.y = uniforms.grid_size.y + 2;
     } else if (uniforms.padding_extend & EXTEND_UP) {
       grid_pos.y = 0;
@@ -573,6 +583,7 @@ struct CellTextVertexOut {
   float4 color [[flat]];
   float4 bg_color [[flat]];
   float2 tex_coord;
+  bool synthetic_above [[flat]];
 };
 
 vertex CellTextVertexOut cell_text_vertex(
@@ -612,6 +623,7 @@ vertex CellTextVertexOut cell_text_vertex(
 
   CellTextVertexOut out;
   out.atlas = in.atlas;
+  out.synthetic_above = in.grid_pos.y == uniforms.grid_size.y + 2;
 
   //              === Grid Cell ===
   //      +X
@@ -715,6 +727,12 @@ fragment float4 cell_text_fragment(
   texture2d<float> textureColor [[texture(1)]],
   constant Uniforms& uniforms [[buffer(1)]]
 ) {
+  if (outside_grid_viewport(in.position.xy, uniforms)) discard_fragment();
+  // The synthetic row above exists only to fill the slice opened inside the
+  // grid by positive pixel scrolling. Never let it paint fixed top padding.
+  if (in.synthetic_above && in.position.y < uniforms.grid_padding.x) {
+    discard_fragment();
+  }
   constexpr sampler textureSampler(
     coord::pixel,
     address::clamp_to_edge,
@@ -871,6 +889,7 @@ fragment float4 image_fragment(
   texture2d<float> image [[texture(0)]],
   constant Uniforms& uniforms [[buffer(1)]]
 ) {
+  if (outside_grid_viewport(in.position.xy, uniforms)) discard_fragment();
   constexpr sampler textureSampler(
     coord::pixel,
     address::clamp_to_edge,
@@ -887,4 +906,3 @@ fragment float4 image_fragment(
 
   return rgba;
 }
-
