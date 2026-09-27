@@ -302,6 +302,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// wakeup.
         kitty_animation_next_ms: ?u64 = null,
 
+        /// True while a slide to the bottom (State.scroll_slide) is running,
+        /// so the renderer keeps preparing frames until it lands.
+        scroll_slide_active: bool = false,
+
         const HighlightTag = enum(u8) {
             search_match,
             search_match_selected,
@@ -1095,6 +1099,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// i.e. 120fps, and the floor for any animation wake delay.
         pub const draw_interval_ms: u64 = 8;
 
+        /// How long a slide to the bottom takes, in milliseconds.
+        const scroll_slide_ms: f64 = 150;
+
         /// A point in the future when the renderer needs to be driven
         /// again to keep animating, and what kind of drive it needs.
         pub const AnimationWake = struct {
@@ -1121,6 +1128,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         ///
         /// Must be called on the render thread.
         pub fn animationWake(self: *const Self) ?AnimationWake {
+            // A slide to the bottom moves the viewport every frame. An update
+            // wake includes a draw, so it covers every other animation too.
+            if (self.scroll_slide_active) return .{
+                .delay_ms = draw_interval_ms,
+                .kind = .update,
+            };
+
             // Custom shaders animate by redrawing on a fixed cadence,
             // gated by configuration and focus.
             const shader_delay: ?u64 = shader: {
@@ -1415,6 +1429,34 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 if (state.terminal.modes.get(.synchronized_output)) {
                     log.debug("synchronized output started, skipping render", .{});
                     return;
+                }
+
+                // Advance a slide to the bottom (State.scroll_slide): an
+                // ease-out over scroll_slide_ms, placed as whole rows above
+                // the bottom plus a sub-cell offset.
+                self.scroll_slide_active = false;
+                if (state.scroll_slide) |*slide| {
+                    const now: std.Io.Timestamp = .now(global.io(), .awake);
+                    const start = slide.start orelse start: {
+                        slide.start = now;
+                        break :start now;
+                    };
+                    const elapsed: f64 = @floatFromInt(start.durationTo(now).toMilliseconds());
+                    const t = @min(1.0, elapsed / scroll_slide_ms);
+                    const remaining = slide.distance_px * std.math.pow(f64, 1.0 - t, 3);
+                    state.terminal.scrollViewport(.bottom);
+                    if (remaining < 0.5) {
+                        state.scroll_slide = null;
+                        state.mouse.pending_scroll_y = 0;
+                    } else {
+                        const cell_h: f64 = @floatFromInt(self.grid_metrics.cell_height);
+                        const rows = @floor(remaining / cell_h);
+                        if (rows >= 1) state.terminal.scrollViewport(.{
+                            .delta = -@as(isize, @intFromFloat(rows)),
+                        });
+                        state.mouse.pending_scroll_y = remaining - rows * cell_h;
+                        self.scroll_slide_active = true;
+                    }
                 }
 
                 // If scroll-to-bottom on output is enabled, check if the final line
