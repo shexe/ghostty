@@ -1,159 +1,102 @@
-# Ghostty: smooth pixel scrolling (personal fork)
+# Ghostty, with smooth scrolling and seamless resize
 
-A personal fork of [Ghostty](https://ghostty.org) that adds **continuous,
-sub-cell trackpad scrolling** on macOS. Mainline Ghostty scrolls the scrollback
-one whole row at a time. This fork keeps the fractional part of each trackpad
-delta, so the scrollback glides between lines the way native macOS apps do and
-comes to rest between rows wherever you stop, with no snap back to a row
-boundary.
-
-It also adds **Option-click to move the cursor** in the prompt, with no shell
-integration required, makes **⌘-click open URLs that are hard-wrapped
-across lines** by programs such as tmux and Claude Code, and adds a
-**claude.ai-style compose box** for writing prompts to
-[Claude Code](https://claude.com/claude-code) natively.
-
-Built on Ghostty **v1.3.1**. This is an unofficial personal fork and is not
+An unofficial fork of [Ghostty](https://ghostty.org) for macOS, built on
+Ghostty's `main` branch as of September 25, 2026
+([`6301810`](../../commit/6301810a48aaa3426887a4316668f18833a40138)). It is not
 affiliated with the Ghostty project.
 
-> **The fork lives on the [`pixel-scroll`](../../tree/pixel-scroll) branch.**
-> The [**full diff against v1.3.1**](../../compare/v1.3.1...pixel-scroll) shows
-> everything it changes, about 2,500 lines across 33 files.
+It combines three sets of changes, each kept on its own branch and merged into
+`main`:
 
-## What it does
+| Branch | Base | What it adds |
+| --- | --- | --- |
+| [`pixel-scroll`](../../compare/6301810a4...pixel-scroll) | Ghostty `main` | Smooth, sub-cell trackpad scrolling and more, by [Ian Kahn](https://github.com/lemur1905/ghostty-pixel-scroll), rebased onto current Ghostty. |
+| [`scroll-fixes`](../../compare/pixel-scroll...scroll-fixes) | `pixel-scroll` | A fix to pixel scrolling. |
+| [`seamless-resize`](../../compare/pixel-scroll...seamless-resize) | `pixel-scroll` | Keeps the picture in step with a live window resize. |
+| [`kitty-streaming`](../../compare/6301810a4...kitty-streaming) | Ghostty `main` | Faster Kitty graphics for programs that stream video. |
 
-- Trackpad scrolling moves the viewport by sub-cell amounts and rests between
-  lines instead of jumping row to row.
-- Partial rows render at the top and bottom of the viewport while the view is
-  parked between lines, so there is no blank sliver or missing line at the
-  window edge.
-- Mouse hit-testing accounts for the sub-cell offset, so clicks and text
-  selections land on the row you actually see.
-- Pixel scrolling turns itself off where line-stepping is the correct behavior.
-  Mouse-reporting and alternate-screen apps (vim, less, htop, an editor running
-  in Claude Code), and the top and bottom of the scrollback, are unaffected.
-- Option-click positions the cursor in the prompt, with no shell integration
-  required.
-- ⌘-click opens URLs that span hard-wrapped lines. Programs that wrap their
-  own output (tmux, TUIs like Claude Code) emit a real newline mid-URL, which
-  stock Ghostty treats as the end of the line. Link matching joins neighboring
-  full-width rows, so the whole URL highlights and opens.
+## Smooth scrolling
 
-## Compose box (for Claude Code)
+Trackpad scrolling moves the scrollback by fractions of a row and comes to rest
+between rows, the way native macOS apps scroll. The rows just beyond the
+viewport come from Ghostty's own render-state overscan. The `pixel-scroll`
+branch also adds Option-click to move the cursor, ⌘-click on hard-wrapped URLs,
+and a compose box for Claude Code; its
+[README](../../blob/pixel-scroll/README.md) describes them, and
+[`REBASING.md`](REBASING.md) maps the files it touches.
 
-A native prompt panel docked to the bottom of the terminal (⌘+;), styled
-after claude.ai, for writing Claude Code prompts with real macOS text
-editing — mouse selection, multi-line editing, per-tab drafts that
-survive closing the panel. Text is delivered to the terminal as one
-bracketed paste; Enter submits, ⌘/⇧/⌃+Enter insert newlines (all
-rebindable via `compose-*` config options).
+`scroll-fixes` corrects one thing in it: a failed cell rebuild no longer leaves
+the scroll offset describing cells that were never built.
 
-- **Auto-popup**: plain typing or pasting in a Claude Code tab (detected
-  by title heuristic) opens the box seeded with what you typed.
-  Toggleable per tab (⌘⇧+;), with a one-shot bypass (⌘⇧+I) for typing a
-  single command straight into the terminal.
-- **Slash commands stay native**: typing `/` hands off to Claude Code's
-  own slash-command menu in the terminal, and the box stays out of the
-  way until the command is sent, cancelled, or deleted — including the
-  single-key answers to dialogs like `/model`.
-- **Images**: pasted images attach as thumbnails, delivered on send the
-  way Claude Code ingests them (clipboard + Ctrl+V). Thumbnails behave
-  like claude.ai's: hover shows a remove button, click opens a
-  full-size preview overlay.
-- **Large pastes collapse** to `[Pasted text #N +K lines]` placeholders,
-  expanded back at send time, mirroring Claude Code's own behavior.
-- Master switch: `compose-enabled` config option.
+## Seamless resize
 
-## How the scrolling works
+In stock Ghostty the window edge runs ahead of the terminal during a fast
+resize, and the newly exposed area stays empty until the next frame. This
+branch changes how frames reach the screen:
 
-macOS trackpad events already carry precise pixel deltas. Stock Ghostty
-accumulates them into whole-cell steps and discards the remainder. The patch
-keeps that remainder as a viewport offset and threads it through the renderer:
+- Frames are presented through `CAMetalLayer` drawables instead of IOSurface
+  layer contents.
+- During a live resize, the GPU draw of each frame happens in AppKit's display
+  callback, so it lands in the same Core Animation transaction as the window's
+  new size.
+- While a resize runs, the terminal draws a little beyond the window edge (80 pt
+  by default), so the area the window grows into is already painted.
+- Sizes are applied to the terminal and its PTY as they arrive, without a 25 ms
+  coalescing delay, and synchronized output stays on across a resize.
+- The alternate screen is full-bleed, and it keeps its top row fixed when it
+  shrinks.
 
-- `scrollCallback` (`src/Surface.zig`) preserves the sub-cell remainder and
-  mirrors it into renderer state under the mutex.
-- Every frame, the renderer **gates** the offset (`State.scrollOffset`), forcing
-  it to zero in mouse-reporting apps, on the alternate screen, and at the
-  scrollback edges. The gated value drives a new `grid_offset_y` uniform.
-- The **Metal and OpenGL shaders** translate cell text, cell backgrounds, and
-  images vertically by that offset.
-- To avoid a gap at the window edges, the renderer builds a few extra rows
-  beyond the viewport (`src/terminal/render.zig`, `src/renderer/cell.zig`) and
-  the shaders admit them via a `grid_extra_rows` bitmask. The bottom needs two
-  extra rows, since it has to cover the window's slack band as well as the
-  scroll gap. The top needs one.
-- `posToViewport` subtracts the applied offset so selection math matches what's
-  on screen.
+Shell text never waits for the program running in the terminal. A full-screen
+program (vim, htop, a video player) still has to redraw for the new size, so on
+very fast drags its new area can trail by that program's redraw time.
 
-The full design notes and per-file map live in
-[`REBASING.md`](REBASING.md).
+The embedding API gains three calls for hosts: `ghostty_surface_set_live_resizing`,
+`ghostty_surface_set_resize_lead` (a longer lead for a fast drag), and
+`ghostty_surface_last_presented_pixel_size` (the size of the frame actually on
+screen).
 
-## Building (macOS, Apple Silicon)
+## Kitty graphics streaming
 
-This fork builds with Ghostty's normal toolchain, plus two workarounds for
-recent Xcode SDK breakage discovered on Xcode 26.5 and macOS 26.
+Programs such as `mpv --vo=kitty` play video by sending a new image every
+frame. `kitty-streaming` uploads each frame into the texture a replaced image
+of the same size used, once the GPU is done with it, instead of allocating a
+new texture every frame.
 
-**Requirements**
+## Building
 
-- Full **Xcode 26+** selected (`xcode-select -p` should point into Xcode, not
-  just the Command Line Tools).
-- **Homebrew `zig@0.15`**, not the ziglang.org tarball. Xcode 26.4+ SDKs drop
-  `arm64-macos` from the `libSystem.tbd` umbrella, which makes the stock Zig
-  0.15 linker resolve zero libc symbols
-  ([ghostty#11991](https://github.com/ghostty-org/ghostty/issues/11991),
-  [ziglang#31658](https://codeberg.org/ziglang/zig/issues/31658)). Homebrew
-  backported the Zig 0.16 fix into its 0.15 bottle.
-- **Homebrew `llvm@20`**, which provides `llvm-libtool-darwin`. Xcode 26.5's
-  `libtool` drops Zig-built archive members that aren't 8-byte aligned, causing
-  spurious "undefined symbol" link failures.
-  [`tools/bin/libtool`](tools/bin/libtool) shims around it. Keep `tools/bin`
-  first in `PATH`.
-- The **Metal Toolchain**, installed once with
-  `xcodebuild -downloadComponent MetalToolchain`.
+Requires full Xcode, [Zig](https://ziglang.org) 0.16 and the Metal toolchain
+(`xcodebuild -downloadComponent MetalToolchain`).
 
 ```sh
-brew install zig@0.15 llvm@20
+# Ghostty.app
+zig build -Doptimize=ReleaseFast
 
-PATH="$PWD/tools/bin:/opt/homebrew/opt/zig@0.15/bin:$PATH" \
-  zig build -Doptimize=ReleaseFast -Dsentry=false -Dxcframework-target=native
-
-open macos/build/ReleaseLocal/Ghostty.app
+# GhosttyKit.xcframework only, for embedding
+zig build -Doptimize=ReleaseFast -Demit-xcframework=true \
+  -Demit-macos-app=false -Dxcframework-target=native
 ```
 
-- `-Dsentry=false`: no crash reporting in a personal build (and Sentry was one of
-  the libtool-mangled archives).
-- `-Dxcframework-target=native`: arm64-only. The x86_64 half hits the same
-  libtool issue and isn't needed locally.
+## Updating
 
-If a build fails with a wall of "undefined symbol" errors after a toolchain
-change, clear the caches first: `rm -rf .zig-cache ~/.cache/zig macos/build`.
+Each branch is a short series of commits on its base. When a base moves
+(Ghostty `main`, or lemur's `pixel-scroll`), rebase the branches that sit on
+it, using `--rebase-merges` for `seamless-resize` since it merges
+`scroll-fixes`, then merge them into `main` again.
 
-## Rebasing onto a newer Ghostty release
-
-The patch is a short, rebase-friendly series of commits. To carry it onto a new
-release:
-
-```sh
-git fetch origin --tags
-git rebase vX.Y.Z pixel-scroll
-```
-
-[`REBASING.md`](REBASING.md) lists every file the patch touches and what it does
-there, so conflicts can be re-applied by intent. If upstream lands native smooth
-scrolling ([discussion #3206](https://github.com/ghostty-org/ghostty/discussions/3206)),
-this fork can be dropped entirely.
+`.githooks/pre-push` on `main` refuses pushes to anything but this repository.
+Run `git config core.hooksPath .githooks` once after cloning. The feature
+branches don't carry the hook, so push them while `main` is checked out.
 
 ## Credits
 
-- [**Ghostty**](https://github.com/ghostty-org/ghostty) by Mitchell Hashimoto and
-  contributors, the terminal this builds on. Its original README is preserved as
-  [`README-upstream.md`](README-upstream.md).
-- The scrolling approach adapts a proof-of-concept by
-  [**@pfgithub**](https://github.com/pfgithub) in
-  [discussion #3206](https://github.com/ghostty-org/ghostty/discussions/3206),
-  reworked to integrate with the renderer directly.
-- Developed by Ian Kahn, with [Claude Code](https://claude.com/claude-code).
+- [Ghostty](https://github.com/ghostty-org/ghostty) by Mitchell Hashimoto and
+  contributors. Its README is kept as [`README-upstream.md`](README-upstream.md).
+- Smooth scrolling, Option-click, wrapped links and the compose box
+  (`pixel-scroll`) by [Ian Kahn](https://github.com/lemur1905), adapting a
+  proof of concept by [@pfgithub](https://github.com/pfgithub).
+- Scroll fixes, seamless resize and Kitty streaming by
+  [shexe](https://github.com/shexe).
 
 ## License
 
-MIT, inherited from upstream Ghostty. See [`LICENSE`](LICENSE).
+MIT, inherited from Ghostty. See [`LICENSE`](LICENSE).
