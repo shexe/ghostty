@@ -86,7 +86,7 @@ jobs:
       - name: Build every branch
         if: steps.sync.outputs.changed == 'true'
         run: |
-          for b in pixel-scroll kitty-streaming scroll-fixes seamless-resize main; do
+          for b in pixel-scroll kitty-streaming scroll-fixes seamless-resize region-scroll main; do
             echo "::group::$b"
             git checkout -q "$b"
             zig build -Doptimize=ReleaseFast -Demit-xcframework=true \
@@ -102,7 +102,7 @@ jobs:
           old_main="$(git rev-parse origin/main)"
           refs=("$old_main:refs/archive/main-${old_main:0:12}")
           leases=()
-          for b in ghostty-main pixel-scroll kitty-streaming scroll-fixes seamless-resize main; do
+          for b in ghostty-main pixel-scroll kitty-streaming scroll-fixes seamless-resize region-scroll main; do
             leases+=("--force-with-lease=refs/heads/$b:$(git rev-parse -q --verify "origin/$b" || true)")
             refs+=("refs/heads/$b:refs/heads/$b")
           done

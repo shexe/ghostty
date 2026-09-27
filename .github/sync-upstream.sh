@@ -2,14 +2,14 @@
 # Rebase this fork's branches onto upstream Ghostty main.
 #
 # pixel-scroll and kitty-streaming are replayed onto the new Ghostty commit,
-# then scroll-fixes, seamless-resize and main onto the new pixel-scroll. Each
-# commit keeps its author, committer and dates, so a commit that is unchanged
-# on an unchanged parent keeps its SHA, and the copies of a branch inside the
-# branches that merge it stay identical to the branch itself. Merges are redone
-# against the replayed side, with conflicts resolved the way the original
-# merges resolved them (learned with rerere, as git's contrib/rerere-train.sh
-# does). Anything else that conflicts, or a commit that becomes empty, stops
-# the sync.
+# then scroll-fixes, seamless-resize, region-scroll and main onto the new
+# pixel-scroll. Each commit keeps its author, committer and dates, so a
+# commit that is unchanged on an unchanged parent keeps its SHA, and the
+# copies of a branch inside the branches that merge it stay identical to the
+# branch itself. Merges are redone against the replayed side, with conflicts
+# resolved the way the original merges resolved them (learned with rerere, as
+# git's contrib/rerere-train.sh does). Anything else that conflicts, or a
+# commit that becomes empty, stops the sync.
 #
 # The result is left in the local branches, and ghostty-main is set to the new
 # Ghostty commit. Nothing is pushed. Prints one line per branch and, under
@@ -19,7 +19,7 @@
 
 set -euo pipefail
 
-branches="pixel-scroll kitty-streaming scroll-fixes seamless-resize main"
+branches="pixel-scroll kitty-streaming scroll-fixes seamless-resize region-scroll main"
 
 # rerere is enabled for this run only, not written to the repository config.
 export GIT_CONFIG_COUNT=2
@@ -121,6 +121,7 @@ main() {
     replay kitty-streaming "$kbase" "$onto"
     replay scroll-fixes "$p0" "$p1"
     replay seamless-resize "$p0" "$p1"
+    replay region-scroll "$p0" "$p1"
     replay main "$p0" "$p1"
     git branch -f ghostty-main "$onto"
     git checkout -q main
