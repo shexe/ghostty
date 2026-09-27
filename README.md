@@ -11,7 +11,7 @@ It combines three sets of changes, each kept on its own branch and merged into
 | Branch | Base | What it adds |
 | --- | --- | --- |
 | [`pixel-scroll`](../../compare/ghostty-main...pixel-scroll) | Ghostty `main` | Smooth, sub-cell trackpad scrolling and more, by [Ian Kahn](https://github.com/lemur1905/ghostty-pixel-scroll), rebased onto current Ghostty. |
-| [`scroll-fixes`](../../compare/pixel-scroll...scroll-fixes) | `pixel-scroll` | A fix to pixel scrolling. |
+| [`scroll-fixes`](../../compare/pixel-scroll...scroll-fixes) | `pixel-scroll` | Two fixes to pixel scrolling. |
 | [`seamless-resize`](../../compare/pixel-scroll...seamless-resize) | `pixel-scroll` | Keeps the picture in step with a live window resize. |
 | [`kitty-streaming`](../../compare/ghostty-main...kitty-streaming) | Ghostty `main` | Faster Kitty graphics for programs that stream video. |
 
@@ -25,8 +25,12 @@ and a compose box for Claude Code; its
 [README](../../blob/pixel-scroll/README.md) describes them, and
 [`REBASING.md`](REBASING.md) maps the files it touches.
 
-`scroll-fixes` corrects one thing in it: a failed cell rebuild no longer leaves
-the scroll offset describing cells that were never built.
+`scroll-fixes` corrects two things in it:
+
+- A failed cell rebuild no longer leaves the scroll offset describing cells
+  that were never built.
+- Typing while a trackpad fling is still gliding no longer fights the jump to
+  the bottom: the rest of the fling is dropped.
 
 ## Seamless resize
 
