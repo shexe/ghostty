@@ -37,6 +37,13 @@ pub const State = struct {
     /// Overlays
     overlay_placements: std.ArrayListUnmanaged(Placement),
 
+    /// Textures of images that were replaced, kept so a later image of the
+    /// same size can be uploaded into one instead of allocating a new texture.
+    /// A program that streams frames as Kitty images (mpv --vo=kitty) replaces
+    /// the same image every frame; a fresh texture per frame costs a GPU
+    /// allocation and mapping that dominated its frame time.
+    retired: std.ArrayListUnmanaged(Retired),
+
     pub const empty: State = .{
         .images = .empty,
         .kitty_placements = .empty,
@@ -44,7 +51,38 @@ pub const State = struct {
         .kitty_text_end = 0,
         .kitty_virtual = false,
         .overlay_placements = .empty,
+        .retired = .empty,
     };
+
+    /// A replaced image's texture and the number of frames that had been
+    /// committed when it was replaced. Only those frames can still be reading
+    /// it, so it may be overwritten once that many frames have completed.
+    pub const Retired = struct {
+        texture: Texture,
+        committed: u64,
+    };
+
+    /// Retired textures kept at most; beyond this the oldest is released.
+    const max_retired = 4;
+
+    /// Keep a replaced texture for reuse.
+    fn retire(self: *State, alloc: Allocator, texture: Texture, committed: u64) void {
+        self.retired.append(alloc, .{ .texture = texture, .committed = committed }) catch {
+            texture.deinit();
+            return;
+        };
+        if (self.retired.items.len > max_retired) self.retired.orderedRemove(0).texture.deinit();
+    }
+
+    /// A retired texture of exactly this size that no in-flight frame can be
+    /// reading, or null.
+    fn takeRetired(self: *State, width: usize, height: usize, completed: u64) ?Texture {
+        for (self.retired.items, 0..) |r, i| {
+            if (r.texture.width == width and r.texture.height == height and r.committed <= completed)
+                return self.retired.orderedRemove(i).texture;
+        }
+        return null;
+    }
 
     pub fn deinit(self: *State, alloc: Allocator) void {
         {
@@ -54,6 +92,8 @@ pub const State = struct {
         }
         self.kitty_placements.deinit(alloc);
         self.overlay_placements.deinit(alloc);
+        for (self.retired.items) |r| r.texture.deinit();
+        self.retired.deinit(alloc);
     }
 
     /// Upload any images to the GPU that need to be uploaded,
@@ -62,10 +102,15 @@ pub const State = struct {
     /// If any uploads fail, they are ignored. The return value
     /// can be used to detect if upload was a total success (true)
     /// or not (false).
+    /// `committed` is the number of frames committed to the GPU so far and
+    /// `completed` the number the GPU has finished; they decide when a
+    /// replaced image's texture is safe to reuse.
     pub fn upload(
         self: *State,
         alloc: Allocator,
         api: *GraphicsAPI,
+        committed: u64,
+        completed: u64,
     ) bool {
         var success: bool = true;
         var image_it = self.images.iterator();
@@ -78,9 +123,12 @@ pub const State = struct {
             }
 
             if (img.isPending()) {
-                img.upload(
+                img.uploadReusing(
                     alloc,
                     api,
+                    self,
+                    committed,
+                    completed,
                 ) catch |err| {
                     log.warn("error uploading image to GPU err={}", .{err});
                     success = false;
@@ -810,6 +858,7 @@ pub const Placement = struct {
     source_y: u32,
     source_width: u32,
     source_height: u32,
+
 };
 
 /// Image identifier used to store and lookup images.
@@ -1101,6 +1150,49 @@ pub const Image = union(enum) {
         //       We don't currently actually replace the existing texture
         //       in-place but that is an optimization we can do later.
         self.deinit(alloc);
+        self.* = .{ .ready = texture };
+    }
+
+    /// `upload`, for images owned by a `State`: the new texture comes from the
+    /// state's retired textures when one of the same size is safe to
+    /// overwrite, and a replaced texture is retired instead of released.
+    pub fn uploadReusing(
+        self: *Image,
+        alloc: Allocator,
+        api: *const GraphicsAPI,
+        state: *State,
+        committed: u64,
+        completed: u64,
+    ) (wuffs.Error || error{UploadFailed})!void {
+        assert(self.isPending());
+        const p = self.getPendingPointer().?;
+        try p.prepForUpload(alloc);
+        const width: usize = @intCast(p.width);
+        const height: usize = @intCast(p.height);
+
+        const texture = if (state.takeRetired(width, height, completed)) |t| reuse: {
+            t.replaceRegion(0, 0, width, height, p.dataSlice()) catch {
+                t.deinit();
+                return error.UploadFailed;
+            };
+            break :reuse t;
+        } else Texture.init(
+            api.imageTextureOptions(.rgba, true),
+            width,
+            height,
+            p.dataSlice(),
+        ) catch return error.UploadFailed;
+        errdefer comptime unreachable;
+
+        // Release the pending data; a replaced texture is retired for reuse.
+        switch (self.*) {
+            .pending => |pending| alloc.free(pending.dataSlice()),
+            .replace => |r| {
+                alloc.free(r.pending.dataSlice());
+                state.retire(alloc, r.texture, committed);
+            },
+            else => unreachable, // isPending, and not unloading
+        }
         self.* = .{ .ready = texture };
     }
 
