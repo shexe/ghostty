@@ -178,7 +178,7 @@ pub fn build(b: *std.Build) !void {
         });
         lib.root_module.addCSourceFiles(.{
             .root = b.path(""),
-            .files = &.{"ext.cpp"},
+            .files = &.{"dcimgui_ext.cpp"},
             .flags = all_flags.items,
         });
 
