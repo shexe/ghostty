@@ -11,7 +11,7 @@ It combines three sets of changes, each kept on its own branch and merged into
 | Branch | Base | What it adds |
 | --- | --- | --- |
 | [`pixel-scroll`](../../compare/ghostty-main...pixel-scroll) | Ghostty `main` | Smooth, sub-cell trackpad scrolling and more, by [Ian Kahn](https://github.com/lemur1905/ghostty-pixel-scroll), rebased onto current Ghostty. |
-| [`scroll-fixes`](../../compare/pixel-scroll...scroll-fixes) | `pixel-scroll` | Two fixes to pixel scrolling. |
+| [`scroll-fixes`](../../compare/pixel-scroll...scroll-fixes) | `pixel-scroll` | Fixes to pixel scrolling, and a slide to the bottom when you type. |
 | [`seamless-resize`](../../compare/pixel-scroll...seamless-resize) | `pixel-scroll` | Keeps the picture in step with a live window resize. |
 | [`kitty-streaming`](../../compare/ghostty-main...kitty-streaming) | Ghostty `main` | Faster Kitty graphics for programs that stream video. |
 
@@ -31,6 +31,10 @@ and a compose box for Claude Code; its
   that were never built.
 - Typing while a trackpad fling is still gliding no longer fights the jump to
   the bottom: the rest of the fling is dropped.
+
+It also makes typing while scrolled back slide the view down to the bottom over
+150 ms, easing out, instead of jumping there in one frame. From more than a
+screen up the slide starts a screen above the bottom, so it never takes longer.
 
 ## Seamless resize
 
