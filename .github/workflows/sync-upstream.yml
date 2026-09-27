@@ -1,0 +1,133 @@
+# Rebase this fork onto Ghostty main every day (see .github/sync-upstream.sh).
+# The branches are pushed only when the rebase is clean, the tests pass and
+# every branch builds. Otherwise nothing is pushed and an issue is opened.
+#
+# The push uses SYNC_TOKEN, a fine-grained token for this repository with
+# Contents and Workflows write access. The built-in token can't push commits
+# that change workflow files, which Ghostty's own commits often do.
+name: Sync upstream
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Rebase, test and build, but don't push"
+        type: boolean
+        default: false
+
+concurrency: sync-upstream
+
+permissions:
+  contents: read
+  actions: write
+  issues: write
+
+jobs:
+  sync:
+    if: github.repository == 'shexe/ghostty'
+    runs-on: macos-26
+    timeout-minutes: 240
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    defaults:
+      run:
+        # Unlike the implicit default, this also sets -o pipefail.
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: Configure git
+        run: |
+          git config core.hooksPath .githooks
+          git config user.name shexe
+          git config user.email "${{ github.repository_owner }}@users.noreply.github.com"
+          git remote add upstream https://github.com/ghostty-org/ghostty.git
+          git remote set-url --push upstream no-push-to-original
+          git fetch -q --no-tags upstream main
+          git fetch -q origin '+refs/heads/*:refs/remotes/origin/*'
+
+      - name: Rebase onto Ghostty main
+        id: sync
+        run: |
+          .github/sync-upstream.sh upstream/main 2>"$RUNNER_TEMP/sync.err" |
+            tee -a "$GITHUB_STEP_SUMMARY" ||
+            { cat "$RUNNER_TEMP/sync.err" >&2; exit 1; }
+
+      - name: Install Zig
+        if: steps.sync.outputs.changed == 'true'
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+
+      - name: Install the Metal toolchain
+        if: steps.sync.outputs.changed == 'true'
+        run: xcodebuild -downloadComponent MetalToolchain
+
+      - name: Test main
+        if: steps.sync.outputs.changed == 'true'
+        run: zig build test
+
+      - name: Build every branch
+        if: steps.sync.outputs.changed == 'true'
+        run: |
+          for b in pixel-scroll kitty-streaming scroll-fixes seamless-resize main; do
+            echo "::group::$b"
+            git checkout -q "$b"
+            zig build -Doptimize=ReleaseFast -Demit-xcframework=true \
+              -Demit-macos-app=false -Dxcframework-target=native
+            echo "::endgroup::"
+          done
+          git checkout -q main
+
+      - name: Push
+        if: steps.sync.outputs.changed == 'true' && !inputs.dry_run
+        env:
+          HAS_TOKEN: ${{ secrets.SYNC_TOKEN != '' }}
+        run: |
+          [ "$HAS_TOKEN" = true ] || { echo "::error::SYNC_TOKEN is not set"; exit 1; }
+          # Keep the replaced main fetchable for anything that pins it (NEO).
+          old_main="$(git rev-parse origin/main)"
+          refs=("$old_main:refs/archive/main-${old_main:0:12}")
+          leases=()
+          for b in ghostty-main pixel-scroll kitty-streaming scroll-fixes seamless-resize main; do
+            leases+=("--force-with-lease=refs/heads/$b:$(git rev-parse -q --verify "origin/$b" || true)")
+            refs+=("refs/heads/$b:refs/heads/$b")
+          done
+          git push --atomic "${leases[@]}" origin "${refs[@]}"
+
+      - name: Disable Ghostty's own workflows
+        if: always()
+        run: |
+          gh workflow list --all --json id,path,state \
+            --jq '.[] | select(.state == "active" and .path != ".github/workflows/sync-upstream.yml") | .id' |
+            while read -r id; do gh workflow disable "$id"; done
+
+      - name: Report the failure
+        if: failure()
+        run: |
+          title="Upstream sync failed"
+          run="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          body="The daily rebase onto Ghostty main stopped, and nothing was pushed: $run"
+          if [ -s "$RUNNER_TEMP/sync.err" ] && grep -q '^sync:' "$RUNNER_TEMP/sync.err"; then
+            body="$body"$'\n\n```\n'"$(sed -n '/^sync:/,$p' "$RUNNER_TEMP/sync.err")"$'\n```'
+          fi
+          n="$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number')"
+          if [ -n "$n" ]; then
+            gh issue comment "$n" --body "$body"
+          else
+            gh issue create --title "$title" --body "$body"
+          fi
+
+      - name: Close the failure issue
+        if: success() && !inputs.dry_run
+        run: |
+          gh issue list --state open --search 'in:title "Upstream sync failed"' --json number --jq '.[].number' |
+            while read -r n; do
+              gh issue close "$n" --comment "Synced in $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            done
