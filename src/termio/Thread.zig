@@ -24,15 +24,6 @@ const renderer = @import("../renderer.zig");
 const Allocator = std.mem.Allocator;
 const log = std.log.scoped(.io_thread);
 
-/// This stores the information that is coalesced.
-const Coalesce = struct {
-    /// The number of milliseconds to coalesce certain messages like resize for.
-    /// Not all message types are coalesced.
-    const min_ms = 25;
-
-    resize: ?renderer.Size = null,
-};
-
 /// The number of milliseconds before we reset the synchronized output flag
 /// if the running program hasn't already.
 const sync_reset_ms = 1000;
@@ -60,12 +51,6 @@ stop_c: xev.Completion = .{},
 scroll: xev.Timer,
 scroll_c: xev.Completion = .{},
 scroll_active: bool = false,
-
-/// This is used to coalesce resize events.
-coalesce: xev.Timer,
-coalesce_c: xev.Completion = .{},
-coalesce_cancel_c: xev.Completion = .{},
-coalesce_data: Coalesce = .{},
 
 /// This timer is used to reset synchronized output modes so that
 /// the terminal doesn't freeze with a bad actor.
@@ -104,10 +89,6 @@ pub fn init(
     var scroll_h = try xev.Timer.init();
     errdefer scroll_h.deinit();
 
-    // This timer is used to coalesce resize events.
-    var coalesce_h = try xev.Timer.init();
-    errdefer coalesce_h.deinit();
-
     // This timer is used to reset synchronized output modes.
     var sync_reset_h = try xev.Timer.init();
     errdefer sync_reset_h.deinit();
@@ -117,7 +98,6 @@ pub fn init(
         .loop = loop,
         .stop = stop_h,
         .scroll = scroll_h,
-        .coalesce = coalesce_h,
         .sync_reset = sync_reset_h,
     };
 }
@@ -126,7 +106,6 @@ pub fn init(
 /// completes executing; the caller must join prior to this.
 pub fn deinit(self: *Thread) void {
     self.scroll.deinit();
-    self.coalesce.deinit();
     self.sync_reset.deinit();
     self.stop.deinit();
     self.loop.deinit();
@@ -306,11 +285,21 @@ fn drainMailbox(
     // expectation is that all our message handlers will be non-blocking
     // ENOUGH to not mess up throughput on producers.
     var redraw: bool = false;
+    // Collapse sizes already waiting in this batch instead of holding the
+    // newest one behind a timer. Flush before any other message so it sees
+    // the resize in mailbox order.
+    var pending_resize: ?renderer.Size = null;
     while (mailbox.pop(global.io())) |message| {
-        // If we have a message we always redraw
-        redraw = true;
+        // (Re)starting the synchronized-output timer changes nothing visible.
+        if (message != .start_synchronized_output) redraw = true;
 
         log.debug("mailbox message={s}", .{@tagName(message)});
+        if (message != .resize) {
+            if (pending_resize) |size| {
+                pending_resize = null;
+                try io.resize(data, size);
+            }
+        }
         switch (message) {
             .color_scheme_report => |v| try io.colorSchemeReport(data, v.force),
             .visibility_report => |v| try io.visibilityReport(
@@ -324,7 +313,7 @@ fn drainMailbox(
                 try io.changeConfig(data, config.ptr);
             },
             .inspector => |v| self.flags.has_inspector = v,
-            .resize => |v| self.handleResize(cb, v),
+            .resize => |v| pending_resize = v,
             .size_report => |v| try io.sizeReport(data, v),
             .clear_screen => |v| try io.clearScreen(data, v.history),
             .scroll_viewport => |v| io.scrollViewport(v),
@@ -368,6 +357,10 @@ fn drainMailbox(
         }
     }
 
+    if (pending_resize) |size| {
+        try io.resize(data, size);
+    }
+
     // Trigger a redraw after we've drained so we don't waste cyces
     // messaging a redraw.
     if (redraw) {
@@ -387,25 +380,6 @@ fn startSynchronizedOutput(self: *Thread, cb: *CallbackData) void {
     );
 }
 
-fn handleResize(self: *Thread, cb: *CallbackData, resize: renderer.Size) void {
-    self.coalesce_data.resize = resize;
-
-    // If the timer is already active we just return. In the future we want
-    // to reset the timer up to a maximum wait time but for now this ensures
-    // relatively smooth resizing.
-    if (self.coalesce_c.state() == .active) return;
-
-    self.coalesce.reset(
-        &self.loop,
-        &self.coalesce_c,
-        &self.coalesce_cancel_c,
-        Coalesce.min_ms,
-        CallbackData,
-        cb,
-        coalesceCallback,
-    );
-}
-
 fn syncResetCallback(
     cb_: ?*CallbackData,
     _: *xev.Loop,
@@ -422,32 +396,6 @@ fn syncResetCallback(
 
     const cb = cb_ orelse return .disarm;
     cb.io.resetSynchronizedOutput();
-    return .disarm;
-}
-
-fn coalesceCallback(
-    cb_: ?*CallbackData,
-    _: *xev.Loop,
-    _: *xev.Completion,
-    r: xev.Timer.RunError!void,
-) xev.CallbackAction {
-    _ = r catch |err| switch (err) {
-        error.Canceled => {},
-        else => {
-            log.warn("error during coalesce callback err={}", .{err});
-            return .disarm;
-        },
-    };
-
-    const cb = cb_ orelse return .disarm;
-
-    if (cb.self.coalesce_data.resize) |v| {
-        cb.self.coalesce_data.resize = null;
-        cb.io.resize(&cb.data, v) catch |err| {
-            log.warn("error during resize err={}", .{err});
-        };
-    }
-
     return .disarm;
 }
 
