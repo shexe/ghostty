@@ -419,6 +419,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// unrealized. Rebuilt on the next `drawFrame`.
         swap_chain: ?SwapChain,
 
+        /// Frames committed to the GPU (renderer thread only) and frames the
+        /// GPU has finished (completion callbacks). Image textures are only
+        /// read by committed frames on one in-order queue, so a texture
+        /// replaced after N commits is free once N frames have completed.
+        frames_committed: u64 = 0,
+        frames_completed: std.atomic.Value(u64) = .init(0),
+
         /// This value is used to force-update swap chain targets in the
         /// event of a config change that requires it (such as blending mode).
         target_config_modified: usize = 0,
@@ -2276,7 +2283,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             }
 
             // Upload images to the GPU as necessary.
-            _ = self.images.upload(self.alloc, &self.api);
+            _ = self.images.upload(
+                self.alloc,
+                &self.api,
+                self.frames_committed,
+                self.frames_completed.load(.acquire),
+            );
 
             // Upload the background image to the GPU as necessary.
             try self.uploadBackgroundImage();
@@ -2507,6 +2519,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             } else {
                 frame_ctx.complete(sync);
             }
+            self.frames_committed += 1;
             return false;
         }
 
@@ -2521,6 +2534,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // Wake while the slot still pins the renderer; releasing the slot
             // is this completion's last renderer access.
             if (rt_app) |app| app.wakeup();
+            _ = self.frames_completed.fetchAdd(1, .release);
             self.swap_chain.?.releaseFrame(token);
         }
 
@@ -2543,6 +2557,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             const changed = self.health_updates.record(health);
             const rt_app = if (changed) self.surface_mailbox.app.rt_app else null;
+            _ = self.frames_completed.fetchAdd(1, .release);
             self.swap_chain.?.releaseFrame(token);
             if (rt_app) |app| app.wakeup();
         }
