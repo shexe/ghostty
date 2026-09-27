@@ -2009,6 +2009,10 @@ pub const Resize = struct {
     /// lost from the top of the scrollback.
     reflow: bool = true,
 
+    /// Keep the top row fixed and discard rows from the bottom when shrinking
+    /// without reflow. Intended for alternate-screen buffers.
+    top_anchor: bool = false,
+
     /// Set this to enable prompt redraw on resize. This signals
     /// that the running program can redraw the prompt if the cursor is
     /// currently at a prompt. This detects OSC133 prompts lines and clears
@@ -2109,6 +2113,7 @@ pub inline fn resize(
         .rows = opts.rows,
         .cols = opts.cols,
         .reflow = opts.reflow,
+        .top_anchor = opts.top_anchor,
         .cursor = .{
             .x = self.cursor.x,
             .y = self.cursor.y,

@@ -19,6 +19,9 @@ mutex: *std.Io.Mutex,
 /// The terminal data.
 terminal: *terminalpkg.Terminal,
 
+/// Geometry belonging to the terminal model, protected by mutex with it.
+size: ?renderer.Size = null,
+
 /// The terminal inspector, if any. This will be null while the inspector
 /// is not active and will be set when it is active.
 inspector: ?*Inspector = null,
