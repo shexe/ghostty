@@ -206,6 +206,17 @@ pub const Uniforms = extern struct {
     /// Various booleans, in a packed struct for space efficiency.
     bools: Bools align(4),
 
+    /// Region scroll animation; see the Metal `Uniforms` for the layout.
+    /// std140 gives every array element 16 bytes, which is why the
+    /// shifts are vec4s and the ghost rows ivec4s.
+    region_rect: [max_region_anims][4]f32 align(16) = @splat(@splat(0)),
+    region_shift: [max_region_anims][4]f32 align(16) = @splat(@splat(0)),
+    ghost_rows: [max_ghost_rows][4]i32 align(16) = @splat(@splat(-1)),
+    anim_counts: [4]u32 align(16) = @splat(0),
+
+    pub const max_region_anims = 4;
+    pub const max_ghost_rows = 64;
+
     const Bools = packed struct(u32) {
         /// Whether the cursor is 2 cells wide.
         cursor_wide: bool,
