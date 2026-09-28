@@ -2099,6 +2099,26 @@ pub const CAPI = struct {
         return true;
     }
 
+    /// Returns true if the binding that the given key event would trigger
+    /// right now is the action in the given string, such as "new_tab" or
+    /// "increase_font_size:1". Nothing runs. It is false when there is no
+    /// binding, when the binding is another action, and when the string is
+    /// not a valid action. A host can use this to send a key to its own
+    /// menu item only when the terminal would do the same action.
+    export fn ghostty_surface_key_binding_matches(
+        surface: *Surface,
+        event: KeyEvent,
+        ptr: [*]const u8,
+        len: usize,
+    ) bool {
+        const core_event = event.keyEvent().core() orelse {
+            log.warn("error processing key event", .{});
+            return false;
+        };
+        const action = input.Binding.Action.parse(ptr[0..len]) catch return false;
+        return surface.core_surface.keyEventBindingMatches(core_event, action);
+    }
+
     /// Send raw text to the terminal. This is treated like a paste
     /// so this isn't useful for sending escape sequences. For that,
     /// individual key input should be used.

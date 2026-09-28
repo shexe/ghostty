@@ -2791,6 +2791,39 @@ pub fn keyEventIsBinding(
     self: *Surface,
     event_orig: input.KeyEvent,
 ) ?input.Binding.Flags {
+    const entry = self.keyEventBinding(event_orig) orelse return null;
+    return switch (entry.value_ptr.*) {
+        .leader => .{},
+        inline .leaf, .leaf_chained => |v| v.flags,
+    };
+}
+
+/// Returns true if the binding that the key event would trigger right now
+/// is exactly `action`. Nothing runs. The lookup is the same as in
+/// `keyEventIsBinding`, so a physical key binding wins over a binding for
+/// the character of the key, as it does when the key is pressed.
+///
+/// An embedder can use this to give a key to its own menu item only when
+/// the terminal would do the same action. A key sequence leader and a
+/// chained binding never match, because only the terminal can run them.
+pub fn keyEventBindingMatches(
+    self: *Surface,
+    event: input.KeyEvent,
+    action: input.Binding.Action,
+) bool {
+    const entry = self.keyEventBinding(event) orelse return false;
+    return switch (entry.value_ptr.*) {
+        .leaf => |leaf| leaf.action.equal(action),
+        .leader, .leaf_chained => false,
+    };
+}
+
+/// Returns the entry of the binding that the key event would trigger right
+/// now, or null if there is none.
+fn keyEventBinding(
+    self: *Surface,
+    event_orig: input.KeyEvent,
+) ?input.Binding.Set.Entry {
     // Apply key remappings for consistency with keyCallback
     var event = event_orig;
     if (self.config.key_remaps.isRemapped(event_orig.mods)) {
@@ -2822,11 +2855,7 @@ pub fn keyEventIsBinding(
         break :entry self.config.keybind.set.getEvent(event) orelse return null;
     };
 
-    // Return flags based on the
-    return switch (entry.value_ptr.*) {
-        .leader => .{},
-        inline .leaf, .leaf_chained => |v| v.flags,
-    };
+    return entry;
 }
 
 /// Called for any key events. This handles keybindings, encoding and
@@ -7027,4 +7056,61 @@ test "queueIo frees allocated writes in readonly mode" {
         .alloc = testing.allocator,
         .data = data,
     } }, .unlocked);
+}
+
+test "keyEventBindingMatches compares the binding that the key triggers" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Only the keyboard state and the key bindings take part in the lookup.
+    const surface = try alloc.create(Surface);
+    defer alloc.destroy(surface);
+    surface.keyboard = .{};
+    surface.config.key_remaps = .empty;
+    surface.config.keybind = .{};
+    const set = &surface.config.keybind.set;
+    defer set.deinit(alloc);
+
+    // A layout with its own + key sends '+' from a physical key that no
+    // binding names. The binding for the character matches.
+    try set.parseAndPut(alloc, "super++=increase_font_size:1");
+    try set.parseAndPut(alloc, "super+==increase_font_size:1");
+    const plus: input.KeyEvent = .{
+        .key = .bracket_right,
+        .utf8 = "+",
+        .unshifted_codepoint = '+',
+        .mods = .{ .super = true },
+    };
+    try testing.expect(surface.keyEventBindingMatches(plus, .{ .increase_font_size = 1 }));
+    try testing.expect(!surface.keyEventBindingMatches(plus, .{ .increase_font_size = 2 }));
+
+    // A second binding for the same action does not change the match.
+    try set.parseAndPut(alloc, "super+t=new_tab");
+    try set.parseAndPut(alloc, "ctrl+shift+t=new_tab");
+    const t: input.KeyEvent = .{
+        .key = .key_t,
+        .utf8 = "t",
+        .unshifted_codepoint = 't',
+        .mods = .{ .super = true },
+    };
+    try testing.expect(surface.keyEventBindingMatches(t, .new_tab));
+
+    // A physical key binding wins over the binding for the character.
+    try set.parseAndPut(alloc, "super+key_t=text:example");
+    try testing.expect(!surface.keyEventBindingMatches(t, .new_tab));
+    try testing.expect(surface.keyEventBindingMatches(t, .{ .text = "example" }));
+    try set.parseAndPut(alloc, "super+key_t=unbind");
+    try testing.expect(surface.keyEventBindingMatches(t, .new_tab));
+
+    // A chained binding and a key sequence leader never match.
+    try set.parseAndPut(alloc, "super+t=new_tab");
+    try set.parseAndPut(alloc, "chain=text:example");
+    try testing.expect(!surface.keyEventBindingMatches(t, .new_tab));
+    try set.parseAndPut(alloc, "super+t>c=new_tab");
+    try testing.expect(!surface.keyEventBindingMatches(t, .new_tab));
+
+    // An unbound key matches nothing.
+    try set.parseAndPut(alloc, "super+t=unbind");
+    try testing.expect(surface.keyEventIsBinding(t) == null);
+    try testing.expect(!surface.keyEventBindingMatches(t, .new_tab));
 }
