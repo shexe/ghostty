@@ -94,10 +94,31 @@ window. When the mode is on:
 - Crash reporting does not start. No per-run folder goes into the cache
   directory, and no crash report goes into the state directory.
 - No template config file is written when none exists.
+  `ghostty_config_open_path` gives the path of the config file, but it does
+  not create the file or its directory.
+- `write_screen_file`, `write_scrollback_file` and `write_selection_file` do
+  nothing, because each one only writes a file to the temporary directory.
 
 libghostty reads the variable at init, like `GHOSTTY_LOG`, because crash
 reporting starts before any config loads. It is off when the variable is unset
 (the default), empty, `0` or `false`.
+
+## Key bindings for host menus
+
+A host app with its own menu can give a key to a menu item only when the
+terminal would do the same action. Then the item runs once, and a key that the
+user binds to a different action stays with the terminal.
+`ghostty_surface_key_binding_matches` takes a key event and an action string,
+such as `new_tab` or `increase_font_size:1`. It is true when the binding that
+the key triggers now is that action. Nothing runs.
+
+It finds the binding the same way as a key press: the active key sequence,
+then the active key tables, then the root set, with physical keys before
+characters. So it is correct in cases where `ghostty_config_trigger`, which
+gives one shortcut for each action, is not: a second binding for an action,
+⌘+ on a layout with its own + key, and a physical key binding such as
+`super+key_t=text:example`. A key sequence leader and a chained binding never
+match, because only the terminal can run them.
 
 ## Building
 
@@ -144,8 +165,9 @@ branches don't carry the hook, so push them while `main` is checked out.
 - Smooth scrolling, Option-click, wrapped links and the compose box
   (`pixel-scroll`) by [Ian Kahn](https://github.com/lemur1905), adapting a
   proof of concept by [@pfgithub](https://github.com/pfgithub).
-- Scroll fixes, seamless resize, Kitty streaming, the link hover color and
-  ephemeral mode by [shexe](https://github.com/shexe).
+- Scroll fixes, seamless resize, Kitty streaming, the link hover color,
+  ephemeral mode and the key binding check for host menus by
+  [shexe](https://github.com/shexe).
 
 ## License
 
