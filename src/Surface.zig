@@ -6209,6 +6209,13 @@ fn writeScreenFile(
     loc: WriteScreenLoc,
     write_screen: input.Binding.Action.WriteScreen,
 ) !void {
+    // An ephemeral process writes no files, and this action only writes a
+    // file. So it does nothing.
+    if (global.ephemeral()) {
+        log.info("ephemeral, not writing the {t} to a file", .{loc});
+        return;
+    }
+
     // Create a temporary directory to store our scrollback.
     var tmp_dir = try internal_os.TempDir.init();
     var retain_tmp_dir = false;

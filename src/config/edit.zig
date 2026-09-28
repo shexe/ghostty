@@ -17,6 +17,10 @@ const global = @import("../global.zig");
 /// For the existence check, we also prefer non-empty files over empty
 /// files.
 ///
+/// When the file does not exist, this creates it, and its directory too.
+/// An ephemeral process (see `global.ephemeral`) creates neither, so the
+/// returned path can then be a file that does not exist.
+///
 /// The returned value is allocated using the provided allocator.
 pub fn openPath(alloc_gpa: Allocator) ![:0]const u8 {
     // Use an arena to make memory management easier in here.
@@ -27,7 +31,7 @@ pub fn openPath(alloc_gpa: Allocator) ![:0]const u8 {
     // Get the path we should open
     const config_path = try configPath(alloc_arena);
 
-    if (!config_path.exists) {
+    if (!config_path.exists and !global.ephemeral()) {
         if (std.fs.path.dirname(config_path.name)) |config_dir| check_dir: {
             // Check to see if dir exists.
             const dir = std.Io.Dir.cwd().openDir(global.io(), config_dir, .{ .follow_symlinks = true }) catch |err| {
