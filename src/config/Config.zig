@@ -1491,19 +1491,21 @@ link: RepeatableLink = .{},
 /// Available since: 1.2.0
 @"link-previews": LinkPreviews = .true,
 
-/// The color of a highlighted link's text and underline. A link is
-/// highlighted when it is underlined: a URL or an OSC 8 hyperlink under the
-/// mouse while command (macOS) or control (other platforms) is held, or any
-/// `link` whose highlight condition matches.
+/// The color of the text and underline of a highlighted link.
 ///
-/// Specified as either hex (`#RRGGBB` or `RRGGBB`) or a named X11 color. If
-/// this is not set, a highlighted link keeps its own colors and is only
-/// underlined.
+/// A link is highlighted when it is underlined. This occurs for a URL or an
+/// OSC 8 hyperlink under the mouse while you hold command (macOS) or control
+/// (other platforms). It also occurs for any `link` whose highlight condition
+/// matches.
 ///
-/// The color takes the place of the link's own foreground color, so the rest
-/// of the cell's styling still applies on top of it: inverse video swaps it
-/// with the background, and `minimum-contrast` adjusts it like any other text
-/// color. Selected text and search matches keep their own colors.
+/// The value is a hex color (`#RRGGBB` or `RRGGBB`) or a named X11 color. If
+/// you do not set it, a highlighted link keeps its own colors and only gets an
+/// underline.
+///
+/// The color replaces only the link's own foreground color, so the other
+/// styles of the cell still apply to it: inverse video swaps it with the
+/// background, and `minimum-contrast` adjusts it as it adjusts all text
+/// colors. Selected text and search matches keep their own colors.
 @"link-hover-color": ?Color = null,
 
 /// Whether to start the window in a maximized state. This setting applies

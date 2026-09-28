@@ -208,11 +208,12 @@ fn displayCallback(renderer: *Renderer) align(8) void {
         native.main_render_serial,
     ) catch |err| {
         if (err == error.DrawableBusy) renderer.api.layer.requestNativeRedraw();
-        // While this callback owns live-resize rendering, the CPU request
-        // stays unserviced until a later callback acquires a drawable.
+        // If this callback does the drawing for a live resize, the render
+        // request waits for a later callback that gets a drawable.
         if (native.main_render_active) return;
-        // Still prepare the newest target; its completion enters the one-slot
-        // mailbox and returned drawable credit schedules its presentation.
+        // If not, draw the newest target without a drawable. The frame goes
+        // into the one-slot mailbox, and it is presented when a drawable slot
+        // is free again.
         var none: ?DrawableLease = null;
         renderer.drawFrameDisplayCallback(false, &none) catch {};
         return;
@@ -303,15 +304,15 @@ pub fn surfaceGeometry(self: *const Metal) !SurfaceGeometry {
     };
 }
 
-/// Resize lead in points: extra room the drawable, the render target and the
-/// size the terminal is asked for all take beyond the layer while a live resize
-/// runs, so the terminal draws the size the window is about to become and the
-/// edge it grows into is already painted.
+/// Resize lead, in points: the extra size beyond the layer that the drawable,
+/// the render target and the terminal size get during a live resize. The
+/// terminal then draws the size that the window is about to have, so the edge
+/// that the window grows into is already painted.
 const resize_lead_points = 80;
 
-/// Zero outside a live resize, so the terminal's size is exact when a drag
-/// ends. The host measures how fast the window is moving and can ask for a
-/// larger lead; only it sees how fast the drag is going.
+/// Zero outside a live resize, so the terminal size is exact when a drag ends.
+/// Only the host can measure how fast the window moves, so the host can ask
+/// for a larger lead.
 fn geometryLeadPx(self: *const Metal, scale: f64) u32 {
     if (!self.layer.liveResizing()) return 0;
     const host = self.layer.hostResizeLeadPx();

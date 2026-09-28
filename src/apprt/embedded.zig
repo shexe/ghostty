@@ -1972,10 +1972,9 @@ pub const CAPI = struct {
         surface.updateSize(w, h);
     }
 
-    /// Pixel size of the frame currently presented on screen. Unlike
-    /// `ghostty_surface_size`, this is what the user can actually see: the
-    /// requested surface size can run ahead of what has been drawn during a
-    /// resize.
+    /// Pixel size of the frame on screen. This is what the user sees. During
+    /// a resize it can differ from `ghostty_surface_size`, because the
+    /// requested surface size can change before a frame of that size is drawn.
     export fn ghostty_surface_last_presented_pixel_size(surface: *Surface) SurfacePixelSize {
         const size = surface.core_surface.renderer.api.layer.lastPresentedPixelSize();
         return .{ .width_px = size.width, .height_px = size.height };
