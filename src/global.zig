@@ -419,6 +419,11 @@ pub const GlobalState = struct {
     ///     folder in the cache directory and no crash report in the state
     ///     directory (`ghostty +crash-report` lists none from this process).
     ///   * No template config file is created when no config file exists.
+    ///     The path for open_config (`ghostty_config_open_path`) does not
+    ///     create the file or its directory either.
+    ///   * The write_screen_file, write_scrollback_file and
+    ///     write_selection_file actions do nothing, because each one only
+    ///     writes a file to the temporary directory.
     ///
     /// It is off when the variable is unset (the default), empty, `0` or
     /// `false`.
