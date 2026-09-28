@@ -83,6 +83,16 @@ text and search matches keep their own colors.
 link-hover-color = #0a84ff
 ```
 
+## Ephemeral mode
+
+With `GHOSTTY_EPHEMERAL=1` in its environment when it starts, libghostty leaves
+nothing of its own on disk, for an embedder that promises its user as much (a
+private window, say): crash reporting doesn't start, so there's no per-run
+folder in the cache directory and no crash report in the state directory, and
+no template config file is written when none exists. It is read at init, like
+`GHOSTTY_LOG`, because crash reporting starts before any config is loaded.
+Unset, empty, `0` or `false` leave it off, the default.
+
 ## Building
 
 Requires full Xcode, [Zig](https://ziglang.org) 0.16 and the Metal toolchain
@@ -125,8 +135,8 @@ branches don't carry the hook, so push them while `main` is checked out.
 - Smooth scrolling, Option-click, wrapped links and the compose box
   (`pixel-scroll`) by [Ian Kahn](https://github.com/lemur1905), adapting a
   proof of concept by [@pfgithub](https://github.com/pfgithub).
-- Scroll fixes, seamless resize, Kitty streaming and the link hover color by
-  [shexe](https://github.com/shexe).
+- Scroll fixes, seamless resize, Kitty streaming, the link hover color and
+  ephemeral mode by [shexe](https://github.com/shexe).
 
 ## License
 
