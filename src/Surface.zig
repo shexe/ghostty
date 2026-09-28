@@ -3017,9 +3017,9 @@ pub fn keyCallback(
 
         if (self.config.scroll_to_bottom.keystroke) {
             // Slide down to the bottom. Do not jump there. From more than one
-            // screen up, start the slide one screen above the bottom, so a
-            // slide never moves more than one screen. If a slide already runs,
-            // typing again lets it continue.
+            // screen up, start the slide one screen above the bottom. A longer
+            // slide in the same 150 ms moves too fast to follow. If a slide
+            // already runs, typing again lets it continue.
             if (self.renderer_state.scroll_slide == null) {
                 const bar = self.io.terminal.screens.active.pages.scrollbar();
                 const cell_h: f64 = @floatFromInt(self.size.cell.height);
