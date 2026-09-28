@@ -1,15 +1,17 @@
 #!/usr/bin/env bash
 # Rebase this fork's branches onto upstream Ghostty main.
 #
-# pixel-scroll and kitty-streaming are replayed onto the new Ghostty commit,
-# then scroll-fixes, seamless-resize and main onto the new pixel-scroll. Each
-# commit keeps its author, committer and dates, so a commit that is unchanged
-# on an unchanged parent keeps its SHA, and the copies of a branch inside the
-# branches that merge it stay identical to the branch itself. Merges are redone
-# against the replayed side, with conflicts resolved the way the original
-# merges resolved them (learned with rerere, as git's contrib/rerere-train.sh
-# does). Anything else that conflicts, or a commit that becomes empty, stops
-# the sync.
+# 1. Replay pixel-scroll and kitty-streaming onto the new Ghostty commit.
+# 2. Replay scroll-fixes, seamless-resize and main onto the new pixel-scroll.
+#
+# Each commit keeps its author, committer and dates. So a commit that does not
+# change, on a parent that does not change, keeps its SHA. And the copy of a
+# branch inside each branch that merges it stays identical to the branch.
+#
+# The script does each merge again against the replayed side. A conflict that
+# an old merge resolved gets the same resolution (rerere learns it, as git's
+# contrib/rerere-train.sh does). Any other conflict, or a commit that becomes
+# empty, stops the sync.
 #
 # The result is left in the local branches, and ghostty-main is set to the new
 # Ghostty commit. Nothing is pushed. Prints one line per branch and, under
@@ -139,6 +141,7 @@ main() {
     [ -z "${GITHUB_OUTPUT:-}" ] || echo "changed=$changed" >>"$GITHUB_OUTPUT"
 }
 
-# Parsed in full before it runs, since checkouts replace this file.
+# Bash reads a script while it runs it, and the checkouts replace this file.
+# So all the work is in main(), which bash reads in full before this call.
 main "$@"
 exit

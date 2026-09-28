@@ -54,8 +54,9 @@ jobs:
           git fetch -q --no-tags upstream main
           git fetch -q origin '+refs/heads/*:refs/remotes/origin/*'
 
-      # Fail before the long build if the token can't push here, and on quiet
-      # days too, so an expired token is noticed before it's needed.
+      # Stop before the long build if the token cannot push here. Do this check
+      # also when there is nothing to sync, so that an expired token shows
+      # before a sync needs it.
       - name: Check the push token
         if: ${{ !inputs.dry_run }}
         env:
@@ -98,7 +99,7 @@ jobs:
       - name: Push
         if: steps.sync.outputs.changed == 'true' && !inputs.dry_run
         run: |
-          # Keep the replaced main fetchable for anything that pins it (NEO).
+          # Keep the old main fetchable. Other projects can pin its commits.
           old_main="$(git rev-parse origin/main)"
           refs=("$old_main:refs/archive/main-${old_main:0:12}")
           leases=()
