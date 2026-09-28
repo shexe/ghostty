@@ -33,19 +33,22 @@ const Pending = struct {
 
 // Presentation ownership and scheduling:
 //
-// renderer completion                 main run loop (any observed mode)
-// retain surface                      persistent source owns state
-// replace latest pending slot ------> take slot, accept/reject, release surface
-// observe current mode + signal source  state owns layer for callback lifetime
+// A renderer completion retains the surface, puts the frame in the pending
+// slot in place of the older frame, and signals the source. The main run loop
+// (in any mode that the source is in) takes the frame from the slot, accepts
+// or rejects it, and releases the surface. The source is persistent and owns
+// the state. The state owns the layer while the callback runs.
 //
-// At most one completed frame waits for the main thread. Published images
-// are immutable, so an unbounded queue would also be unbounded VRAM. AppKit
-// can run private tracking modes during interactive resize. The source is
-// registered in common modes once and in whichever mode the main run loop is
-// currently running whenever a completion arrives. Teardown detaches the
-// state, invalidates the source (removing all mode registrations), then drops
-// the source and owner references. The source context keeps both state and
-// layer alive until Core Foundation has finished with the callback.
+// At most one completed frame waits for the main thread. Published images do
+// not change, so a queue with no limit can use VRAM with no limit. AppKit
+// can run private tracking modes during an interactive resize. So the source
+// is added to the common modes once, and each completion also adds it to the
+// mode that the main run loop runs now.
+//
+// Teardown detaches the state, invalidates the source (this removes it from
+// all modes), then releases the source and owner references. The source
+// context keeps the state and the layer alive until Core Foundation is done
+// with the callback.
 const PresentationState = struct {
     refs: std.atomic.Value(usize) = .init(1),
     mutex: std.Io.Mutex = .init,
@@ -244,10 +247,10 @@ pub fn requestNativeRedraw(self: *IOSurfaceLayer) void {
     requestNativeRedrawState(self.state);
 }
 
-/// Transfer one renderer-thread GPU draw to the AppKit display callback. The
-/// CPU frame is already prepared before this call. Retaining the source under
-/// the same mutex as the serial publication closes detach and exit races; the
-/// Core Foundation calls happen after unlocking.
+/// Move one GPU draw from the renderer thread to the AppKit display callback.
+/// The CPU frame is prepared before this call. Retain the source under the
+/// same mutex lock that publishes the serial, so that a detach or an exit
+/// cannot free the source first. Call Core Foundation after the unlock.
 pub fn handoffRendererDrawToNative(self: *IOSurfaceLayer) bool {
     var source: ?cf.CFRunLoopSourceRef = null;
     self.state.mutex.lockUncancelable(global.io());
@@ -279,10 +282,9 @@ pub fn presentNativeDrawable(
     return presentDrawable(self.state, drawable, buffer, frame_id);
 }
 
-/// Pixel size of the frame currently on screen, i.e. the last accepted
-/// presentation. This is what the user can see; it is deliberately not the
-/// requested surface size, which can run ahead of what has been drawn.
-/// Main thread only.
+/// Pixel size of the last accepted frame, which is the frame on screen. This
+/// is what the user sees. It is not the requested surface size, which can
+/// change before a frame of that size is drawn. Main thread only.
 pub fn lastPresentedPixelSize(self: *IOSurfaceLayer) struct { width: u32, height: u32 } {
     std.debug.assert(isMainThread());
     return .{
@@ -606,8 +608,8 @@ const CopyCompletion = struct {
     state: *PresentationState,
     surface: *IOSurface,
     texture: objc.Object,
-    /// Submission admission credit, settled once both GPU completion and the
-    /// main-thread present decision have arrived.
+    /// Holds one of the two drawable slots. The slot is free again after the
+    /// GPU completes and the main thread presents or discards the drawable.
     settlement: objc.Object,
 
     fn arrive(self: *CopyCompletion, party: DrawableLease.CompletionGate.Party) void {
@@ -726,8 +728,9 @@ fn presentOrRestore(state: *PresentationState, pending: Pending, transactional: 
     if (!restored) pending.release();
 }
 
-/// Restore a frame whose drawable admission was full. Caller owns the pending
-/// retain and holds state.mutex. A newer pending packet wins deterministically.
+/// Put back a frame that found no free drawable slot. The caller owns the
+/// retain of `pending` and holds state.mutex. If the mailbox already has a
+/// newer frame, keep the newer frame.
 fn restorePendingLocked(state: *PresentationState, pending: Pending) bool {
     if (state.pending) |existing| {
         if (existing.frame_id >= pending.frame_id) return false;
@@ -778,10 +781,10 @@ fn presentationSourcePerform(info: ?*anyopaque) callconv(.c) void {
     _ = drainPresentationState(state, false);
 }
 
-/// Takes the latest completed frame under the mailbox mutex, then performs
-/// Objective-C layer work after unlocking. The mailbox retain is released
-/// exactly once regardless of acceptance. A source callback after a display
-/// callback drain safely observes an empty mailbox.
+/// Take the latest completed frame under the mailbox mutex, then do the
+/// Objective-C layer work after the unlock. Release the mailbox retain one
+/// time, whether the frame is accepted or not. If a display callback empties
+/// the mailbox first, a later source callback safely finds it empty.
 fn drainPresentationState(
     state: *PresentationState,
     native_callback: bool,
@@ -796,9 +799,9 @@ fn drainPresentationState(
         // the callback renders the latest prepared state directly below.
         const pending = state.pending;
         state.pending = null;
-        // Consume the retry/display latch claimed by this callback. The CPU
-        // serial remains authoritative for unserviced prepared work, while a
-        // separate retry published during the draw can set the latch again.
+        // Clear the redraw flag that this callback took. The CPU serial still
+        // records the prepared frames that are not drawn. A different retry
+        // during the draw can set the flag again.
         state.native_redraw_needed = false;
         state.mutex.unlock(global.io());
         const p = pending orelse return .empty;
@@ -991,8 +994,9 @@ fn getDrawableSettlementClass() error{ObjCFailed}!objc.Class {
             settleDrawableOwner(object);
             const value = drawableSettlement(object);
             objc.Object.fromId(value.link).release();
-            // NSObject has no owned ivars here; direct runtime disposal avoids
-            // the SDK 27 objc_super field-name mismatch in zig-objc.
+            // Free the object directly with object_dispose. This does not
+            // use the objc_super call of zig-objc, whose field names do not
+            // match SDK 27. NSObject has no ivars here that need a release.
             _ = objc.c.object_dispose(object.value);
         }
     }.dealloc);

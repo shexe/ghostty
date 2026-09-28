@@ -1,6 +1,7 @@
-//! CAMetalLayer drawable helper. The renderer keeps its IOSurface targets and
-//! copies final pixels 1:1 into an exact-size drawable. Submission admission
-//! retires after GPU completion plus the main present/discard decision.
+//! Helpers for CAMetalLayer drawables. The renderer keeps its IOSurface targets
+//! and copies the final pixels 1:1 into a drawable of the same size. A drawable
+//! slot is free again only after the GPU completes and the main thread presents
+//! or discards the drawable.
 const Self = @This();
 const std = @import("std");
 const objc = @import("objc");
@@ -34,7 +35,9 @@ pub fn configure(layer: objc.Object, device: objc.Object, pixel_format: c_ulong)
     layer.setProperty("pixelFormat", pixel_format);
     layer.setProperty("framebufferOnly", false);
     layer.setProperty("maximumDrawableCount", @as(c_ulong, 3));
-    // Apple's default can still block for one second. Never disable it.
+    // Keep the timeout on, as in Apple's default. With it, nextDrawable can
+    // still block, but for one second at most. Without it, nextDrawable can
+    // block with no limit.
     layer.setProperty("allowsNextDrawableTimeout", true);
     layer.setProperty("needsDisplayOnBoundsChange", true);
 }
@@ -108,10 +111,11 @@ fn encodeTextureCopy(
     });
 }
 
-/// Native transaction path only. The buffer MUST already be committed, contain
-/// the drawable write, and have GPU completion/resource retirement registered.
-/// Never hold draw_mutex here. Kept separate from presentScheduled so the
-/// caller can recheck frame-id/geometry/detach policy after the blocking call.
+/// Use only on the native transaction path. The buffer must be committed, must
+/// contain the write to the drawable, and must have its handlers for GPU
+/// completion and resource release registered. Do not hold draw_mutex. This
+/// call blocks. It is separate from presentScheduled, so that the caller can
+/// check the frame id, the geometry and the detach state again after the wait.
 pub fn waitUntilScheduled(buffer: objc.Object) !void {
     assertMainThread();
     const before = buffer.getProperty(c_ulong, "status");
@@ -132,8 +136,9 @@ pub fn presentScheduled(self: *Self, buffer: objc.Object) !void {
     self.presented = true;
 }
 
-/// Ordinary asynchronous drawable path. Register before commit, with presentsWithTransaction=false. The buffer owns
-/// scheduling; this method does NOT retire any renderer resource.
+/// Present on the ordinary asynchronous path. Call before commit, with
+/// presentsWithTransaction=false. The command buffer schedules the present.
+/// This method does not retire renderer resources.
 pub fn scheduleAsync(self: *Self, buffer: objc.Object) !void {
     if (self.presented) return error.AlreadyPresented;
     if (buffer.getProperty(c_ulong, "status") >= 2) return error.BufferAlreadyCommitted;
@@ -152,10 +157,14 @@ fn assertMainThread() void {
     std.debug.assert(objc.getClass("NSThread").?.msgSend(bool, "isMainThread", .{}));
 }
 
-/// Embed in a stable heap-owned completion record, never in a copied ObjC
-/// block by value. Both sides own that record until arriving. The one true
-/// result owns final frame-token retirement/free; a losing side may not access
-/// the record after arrive() returns. GPU status is written before .gpu arrives.
+/// Joins two events: GPU completion and the main thread's present decision.
+/// `arrive` returns true only for the second of the two, and that caller
+/// retires the frame token and frees the record.
+///
+/// Put the gate in a completion record on the heap that does not move. Never
+/// put it by value in an ObjC block, because blocks are copied. Each side owns
+/// the record until it arrives. After `arrive` returns false, do not use the
+/// record. Write the GPU status before the `.gpu` side arrives.
 pub const CompletionGate = struct {
     bits: std.atomic.Value(u8) = .init(0),
     pub const Party = enum(u8) { gpu = 1, main = 2 };

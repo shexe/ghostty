@@ -1147,14 +1147,14 @@ pub fn handleMessage(self: *Surface, msg: Message) !void {
         .password_input => |v| try self.passwordInput(v),
 
         .screen_changed => |alt| {
-            // Note: we intentionally do NOT shortcut when the value is
-            // unchanged. The renderer re-sends this for a short grace period
-            // after a switch so that full-screen programs which install their
-            // SIGWINCH handler slightly late still receive a resize.
+            // Do not skip this when the value is the same. The renderer sends
+            // it again for a short time after a screen switch, so that a
+            // full-screen program that sets its SIGWINCH handler late still
+            // gets a resize.
             self.screen_is_alt = alt;
-            // Re-assert the size unchanged. The termio layer sends SIGWINCH
-            // explicitly, so this notifies late-initializing programs without
-            // mutating the grid (which previously caused horizontal jitter).
+            // Resize to the same size. The termio layer sends SIGWINCH itself,
+            // so a program that sets its handler late gets the signal, and the
+            // grid does not change. A grid change here causes horizontal jitter.
             try self.resize(self.size.screen);
         },
 
@@ -3016,9 +3016,10 @@ pub fn keyCallback(
         }
 
         if (self.config.scroll_to_bottom.keystroke) {
-            // Slide down to the bottom rather than jumping there. From more
-            // than a screen away the slide starts a screen above the bottom,
-            // so it never takes longer. Typing again mid-slide carries on.
+            // Slide down to the bottom. Do not jump there. From more than one
+            // screen up, start the slide one screen above the bottom, so a
+            // slide never moves more than one screen. If a slide already runs,
+            // typing again lets it continue.
             if (self.renderer_state.scroll_slide == null) {
                 const bar = self.io.terminal.screens.active.pages.scrollbar();
                 const cell_h: f64 = @floatFromInt(self.size.cell.height);

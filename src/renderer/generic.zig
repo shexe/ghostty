@@ -87,9 +87,9 @@ fn SlotAvailability(comptime count: usize) type {
     };
 }
 
-/// Preserve the captured viewport, including glyph overhang and partial
-/// scroll rows, at the new grid origin. This never grows the visible domain
-/// of an old packet merely because its new render target is larger.
+/// Keep the captured viewport, with glyph overhang and partial scroll rows,
+/// at the new grid origin. A larger new render target does not show more of
+/// an old prepared frame.
 fn capturedViewport(
     prepared: renderer.Size,
     padding: renderer.Padding,
@@ -281,9 +281,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         last_screen_alt: bool = false,
 
 
-        /// The screen represented by the most recently prepared cell buffer.
-        /// This is updated only after a successful rebuild while draw_mutex is
-        /// held, so drawFrame never extends a stale primary-screen raster.
+        /// The screen of the last prepared cell buffer. It changes only after
+        /// a successful rebuild, with draw_mutex held. So drawFrame does not
+        /// copy the edge pixels of an old primary-screen frame into the
+        /// padding.
         prepared_screen_alt: bool = false,
         prepared_size: ?renderer.Size = null,
         prepared_font_revision: u64 = 0,
@@ -291,12 +292,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// It describes the origin of the last encoded frame.
         last_draw_padding: ?renderer.Padding = null,
 
-        /// While set, we keep re-sending the screen-changed notification for a
-        /// short grace period after a screen switch. The surface turns that
-        /// into a resize (which sends SIGWINCH). Full-screen programs that
-        /// install their signal handlers a little late otherwise miss the
-        /// single initial notification and keep rendering at the old, smaller
-        /// grid size -- leaving a blank strip on the right and bottom.
+        /// While set, send screen_changed again for a short time after a
+        /// screen switch. The surface turns each one into a resize, which
+        /// sends SIGWINCH. Some full-screen programs set their signal handler
+        /// late. Without the resends, they miss the first signal, keep the
+        /// old, smaller grid size and leave a blank strip at the right and
+        /// bottom. A resize to the same size does no harm to a program that
+        /// already handled it.
         resend_screen_alt: bool = false,
         resend_screen_start: ?std.Io.Timestamp = null,
         resend_screen_last: ?std.Io.Timestamp = null,
@@ -1300,8 +1302,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         ///
         /// Must be called on the render thread.
         pub fn animationWake(self: *const Self) ?AnimationWake {
-            // A slide to the bottom moves the viewport every frame. An update
-            // wake includes a draw, so it covers every other animation too.
+            // A slide to the bottom moves the viewport on each frame, so it
+            // needs an update wake. An update wake also draws, so it serves all
+            // other animations too.
             if (self.scroll_slide_active) return .{
                 .delay_ms = draw_interval_ms,
                 .kind = .update,
@@ -1834,13 +1837,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // render state (e.g. rebuildCells).
             self.terminal_state.endUpdate();
 
-            // If the active screen changed, notify the surface. It will
-            // reapply padding (full-bleed on the alternate screen) and
-            // relayout. Because the switch also changes the grid size, and
-            // some full-screen programs only install their SIGWINCH handler
-            // a moment after startup, we keep re-asserting the notification
-            // for a short grace period. Re-asserting the same size is
-            // harmless for programs that already handled it.
+            // If the active screen changed, tell the surface. It sets the
+            // padding again (full-bleed on the alternate screen) and does the
+            // layout again. The switch also changes the grid size, so send the
+            // notification again for a short time (see resend_screen_alt).
             const now: std.Io.Timestamp = .now(global.io(), .awake);
             if (critical.screen_alt != self.last_screen_alt) {
                 self.last_screen_alt = critical.screen_alt;
@@ -1858,8 +1858,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     self.resend_screen_start = null;
                     self.resend_screen_last = null;
                 } else {
-                    // Throttle to at most one re-assert every 150ms so we
-                    // don't spam SIGWINCH every rendered frame.
+                    // Send a maximum of one each 150 ms, not one each frame.
                     const due = if (self.resend_screen_last) |last|
                         last.durationTo(now).toMilliseconds() > 150
                     else
@@ -2077,11 +2076,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 self.syncDisplayLink(null, null);
         }
 
-        /// Draw from the main-thread Metal display callback, presenting through
-        /// `drawable` when it is set. Ordinary bounds changes render captured
-        /// cells into the current target at fixed pitch, clipped to their
-        /// captured viewport. The display link is never resynced here: that
-        /// belongs on the render thread.
+        /// Draw from the Metal display callback on the main thread. Present
+        /// through `drawable` when it is set. When only the bounds change,
+        /// draw the captured cells into the current target at the same cell
+        /// pitch, clipped to their captured viewport. Do not resync the
+        /// display link here. The render thread does that.
         pub fn drawFrameDisplayCallback(
             self: *Self,
             sync: bool,
@@ -2262,11 +2261,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 frame.custom_shader_state = null;
             }
 
+            // Use the padding chosen for this frame. An old resize message can
+            // write over it after the last frame at the same pixel size.
+            self.size.padding = draw_padding;
             // If our stored size doesn't match the
             // surface size we need to update it.
-            // Restore selected padding even when a stale mailbox overwrote
-            // it after the last frame at this same physical geometry.
-            self.size.padding = draw_padding;
             if (size_changed) {
                 self.size.screen = .{
                     .width = surface_size.width,
@@ -2494,10 +2493,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 }
             }
 
-            // Full-bleed alternate-screen content can contain foreground-only
-            // pixels (such as plasma), so a background-only extension leaves
-            // its padding blank. Metal can copy the completed edge raster into
-            // the fitted remainder without changing the grid or its shaders.
+            // On the full-bleed alternate screen, a program can draw pixels
+            // with only a foreground color. If only the background extends,
+            // the padding stays blank. On Metal, copy the edge pixels of the
+            // finished grid into the padding around it (less than one cell).
+            // The grid and its shaders do not change.
             if (comptime @hasDecl(@TypeOf(frame_ctx), "extendRasterEdges")) {
                 const cell_width: usize = self.grid_metrics.cell_width;
                 const cell_height: usize = self.grid_metrics.cell_height;

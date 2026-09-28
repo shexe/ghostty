@@ -149,8 +149,8 @@ const NativeCompletion = struct {
     published: std.atomic.Value(u8) = .init(0),
     block: CompletionBlock.Context,
     lease: ?Drawable,
-    /// Submission admission credit, settled once both GPU completion and the
-    /// main-thread present decision have arrived.
+    /// Holds one of the two drawable slots. The slot is free again after the
+    /// GPU completes and the main thread presents or discards the drawable.
     settlement: objc.Object,
 
     fn arrive(self: *NativeCompletion, party: DrawableHelper.CompletionGate.Party) void {

@@ -410,17 +410,18 @@ pub const GlobalState = struct {
     action: ?cli.ghostty.Action,
     logging: Logging,
 
-    /// Whether this process should leave nothing of its own on disk, for an
-    /// embedder that promises its user as much (a private window, say). Set
-    /// by the GHOSTTY_EPHEMERAL environment variable, read at init because
-    /// crash reporting starts before any config is loaded:
+    /// If true, this process writes none of its own files to disk, for
+    /// example for an embedder that shows a private window. The
+    /// GHOSTTY_EPHEMERAL environment variable sets it at init, because
+    /// crash reporting starts before any config loads:
     ///
-    ///   * No crash reporting: Sentry isn't started, so there is no per-run
+    ///   * No crash reporting: Sentry does not start, so there is no per-run
     ///     folder in the cache directory and no crash report in the state
     ///     directory (`ghostty +crash-report` lists none from this process).
     ///   * No template config file is created when no config file exists.
     ///
-    /// Unset, empty, `0` or `false` leave it off, the default.
+    /// It is off when the variable is unset (the default), empty, `0` or
+    /// `false`.
     ephemeral: bool,
 
     rlimits: ResourceLimits = .{},

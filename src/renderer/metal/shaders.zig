@@ -263,9 +263,10 @@ pub const Uniforms = extern struct {
         use_linear_correction: bool align(1) = false,
     },
 
-    /// Half-open physical viewport of the captured content, translated to
-    /// the current padding origin. The full-target background is not clipped.
-    /// Unbounded by default so non-resize users retain their existing draws.
+    /// Clip rectangle for the captured content: a half-open viewport in
+    /// pixels, moved to the current padding origin. The background of the full
+    /// target is not clipped. The default has no limit, so code that does not
+    /// set it for a resize keeps its draws unclipped.
     grid_clip: [4]f32 align(16) = .{
         -std.math.inf(f32), -std.math.inf(f32),
         std.math.inf(f32),  std.math.inf(f32),

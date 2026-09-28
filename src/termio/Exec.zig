@@ -1149,11 +1149,11 @@ const Subprocess = struct {
             });
         }
 
-        // The kernel only raises SIGWINCH when the pty size actually changes.
-        // We sometimes re-assert the same size to nudge a full-screen program
-        // whose signal handler was installed after the last real resize, so
-        // send the signal explicitly. This notifies without mutating the grid,
-        // which avoids any reflow/visual jitter.
+        // The kernel sends SIGWINCH only when the PTY size changes. Sometimes
+        // the surface resizes to the same size, to reach a full-screen program
+        // that set its signal handler after the last real resize. So send the
+        // signal here. The grid does not change, so there is no reflow or
+        // jitter.
         self.signalWinch();
     }
 
