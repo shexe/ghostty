@@ -1839,8 +1839,9 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
             // If the active screen changed, tell the surface. It sets the
             // padding again (full-bleed on the alternate screen) and does the
-            // layout again. The switch also changes the grid size, so send the
-            // notification again for a short time (see resend_screen_alt).
+            // layout again. The switch changes the grid size, and some
+            // full-screen programs set their SIGWINCH handler late. So send
+            // the notification again for a short time.
             const now: std.Io.Timestamp = .now(global.io(), .awake);
             if (critical.screen_alt != self.last_screen_alt) {
                 self.last_screen_alt = critical.screen_alt;
@@ -1850,11 +1851,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .screen_changed = critical.screen_alt,
                 }, .forever);
             } else if (self.resend_screen_start) |start| {
-                // Only re-assert while a full-screen program is active; the
-                // shell re-reads its size on its own and doesn't need the
-                // extra signals (which would make it redraw its prompt).
+                // Send again only while a full-screen program runs. The shell
+                // reads its size again without help, and more signals make it
+                // draw its prompt again.
                 if (!self.resend_screen_alt or start.durationTo(now).toMilliseconds() > 2000) {
-                    // Grace period over.
+                    // The short time is over.
                     self.resend_screen_start = null;
                     self.resend_screen_last = null;
                 } else {

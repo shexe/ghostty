@@ -994,9 +994,9 @@ fn getDrawableSettlementClass() error{ObjCFailed}!objc.Class {
             settleDrawableOwner(object);
             const value = drawableSettlement(object);
             objc.Object.fromId(value.link).release();
-            // Free the object directly with object_dispose. This does not
-            // use the objc_super call of zig-objc, whose field names do not
-            // match SDK 27. NSObject has no ivars here that need a release.
+            // Do not call [super dealloc] through zig-objc. Its objc_super
+            // field names do not match SDK 27. NSObject has no ivars here
+            // that need a release.
             _ = objc.c.object_dispose(object.value);
         }
     }.dealloc);

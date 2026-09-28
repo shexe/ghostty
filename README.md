@@ -1,4 +1,4 @@
-# Ghostty with smooth scrolling and live resize
+# Ghostty with smooth scrolling and seamless resize
 
 An unofficial fork of [Ghostty](https://ghostty.org) for macOS that follows
 Ghostty's `main` branch, rebased onto it daily.
@@ -27,17 +27,17 @@ and a compose box for Claude Code. Its
 
 `scroll-fixes` corrects two things in it:
 
-- A failed cell rebuild no longer leaves the scroll offset describing cells
-  that were never built.
-- Typing while a trackpad fling is still gliding no longer fights the jump to
-  the bottom: the rest of the fling is dropped.
+- After a failed cell rebuild, the scroll offset still matches the cells that
+  were built.
+- If you type while a trackpad fling glides, the fling stops, so it does not
+  fight the jump to the bottom.
 
 When you type while scrolled back, the view slides down to the bottom in 150 ms
 with an ease-out. It does not jump there in one frame. If the view is more than
-one screen up, the slide starts one screen above the bottom, so a slide never
-moves more than one screen.
+one screen up, the slide starts one screen above the bottom. A longer slide in
+the same 150 ms moves too fast to follow.
 
-## Live resize (`seamless-resize`)
+## Seamless resize
 
 In stock Ghostty the window edge runs ahead of the terminal during a fast
 resize, and the newly exposed area stays empty until the next frame. This
@@ -130,8 +130,8 @@ nothing and opens an issue, and you rebase the branches by hand. Each replaced
 fetchable. The push needs a `SYNC_TOKEN` secret: a fine-grained token for this
 repository with Contents and Workflows write access.
 
-Ian Kahn's repository is not followed; new commits there are brought over by
-hand.
+This fork does not follow Ian Kahn's repository. We copy new commits from it
+by hand.
 
 `.githooks/pre-push` on `main` refuses pushes to anything but this repository.
 Run `git config core.hooksPath .githooks` once after cloning. The feature
@@ -144,7 +144,7 @@ branches don't carry the hook, so push them while `main` is checked out.
 - Smooth scrolling, Option-click, wrapped links and the compose box
   (`pixel-scroll`) by [Ian Kahn](https://github.com/lemur1905), adapting a
   proof of concept by [@pfgithub](https://github.com/pfgithub).
-- Scroll fixes, live resize, Kitty streaming, the link hover color and
+- Scroll fixes, seamless resize, Kitty streaming, the link hover color and
   ephemeral mode by [shexe](https://github.com/shexe).
 
 ## License
