@@ -1,4 +1,4 @@
-# Ghostty, with smooth scrolling and seamless resize
+# Ghostty with smooth scrolling and live resize
 
 An unofficial fork of [Ghostty](https://ghostty.org) for macOS that follows
 Ghostty's `main` branch, rebased onto it daily.
@@ -10,7 +10,7 @@ It combines three sets of changes, each kept on its own branch and merged into
 
 | Branch | Base | What it adds |
 | --- | --- | --- |
-| [`pixel-scroll`](../../compare/ghostty-main...pixel-scroll) | Ghostty `main` | Smooth, sub-cell trackpad scrolling and more, by [Ian Kahn](https://github.com/lemur1905/ghostty-pixel-scroll), rebased onto current Ghostty. |
+| [`pixel-scroll`](../../compare/ghostty-main...pixel-scroll) | Ghostty `main` | Smooth sub-cell trackpad scrolling, Option-click to move the cursor, ⌘-click on wrapped URLs and a compose box, by [Ian Kahn](https://github.com/lemur1905/ghostty-pixel-scroll), rebased onto current Ghostty. |
 | [`scroll-fixes`](../../compare/pixel-scroll...scroll-fixes) | `pixel-scroll` | Fixes to pixel scrolling, and a slide to the bottom when you type. |
 | [`seamless-resize`](../../compare/pixel-scroll...seamless-resize) | `pixel-scroll` | Keeps the picture in step with a live window resize. |
 | [`kitty-streaming`](../../compare/ghostty-main...kitty-streaming) | Ghostty `main` | Faster Kitty graphics for programs that stream video. |
@@ -21,9 +21,9 @@ Trackpad scrolling moves the scrollback by fractions of a row and comes to rest
 between rows, the way native macOS apps scroll. The rows just beyond the
 viewport come from Ghostty's own render-state overscan. The `pixel-scroll`
 branch also adds Option-click to move the cursor, ⌘-click on hard-wrapped URLs,
-and a compose box for Claude Code; its
-[README](../../blob/pixel-scroll/README.md) describes them, and
-[`REBASING.md`](REBASING.md) maps the files it touches.
+and a compose box for Claude Code. Its
+[README](../../blob/pixel-scroll/README.md) describes them.
+[`REBASING.md`](REBASING.md) lists the files it changes.
 
 `scroll-fixes` corrects two things in it:
 
@@ -32,11 +32,12 @@ and a compose box for Claude Code; its
 - Typing while a trackpad fling is still gliding no longer fights the jump to
   the bottom: the rest of the fling is dropped.
 
-It also makes typing while scrolled back slide the view down to the bottom over
-150 ms, easing out, instead of jumping there in one frame. From more than a
-screen up the slide starts a screen above the bottom, so it never takes longer.
+When you type while scrolled back, the view slides down to the bottom in 150 ms
+with an ease-out. It does not jump there in one frame. If the view is more than
+one screen up, the slide starts one screen above the bottom, so a slide never
+moves more than one screen.
 
-## Seamless resize
+## Live resize (`seamless-resize`)
 
 In stock Ghostty the window edge runs ahead of the terminal during a fast
 resize, and the newly exposed area stays empty until the next frame. This
@@ -54,9 +55,10 @@ branch changes how frames reach the screen:
 - The alternate screen is full-bleed, and it keeps its top row fixed when it
   shrinks.
 
-Shell text never waits for the program running in the terminal. A full-screen
-program (vim, htop, a video player) still has to redraw for the new size, so on
-very fast drags its new area can trail by that program's redraw time.
+Ghostty reflows shell text itself, so shell text keeps up with the window. A
+full-screen program (vim, htop, a video player) still has to redraw for the new
+size, so on very fast drags its new area can trail by that program's redraw
+time.
 
 The embedding API gains three calls for hosts: `ghostty_surface_set_live_resizing`,
 `ghostty_surface_set_resize_lead` (a longer lead for a fast drag), and
@@ -66,18 +68,18 @@ screen).
 ## Kitty graphics streaming
 
 Programs such as `mpv --vo=kitty` play video by sending a new image every
-frame. `kitty-streaming` uploads each frame into the texture a replaced image
-of the same size used, once the GPU is done with it, instead of allocating a
-new texture every frame.
+frame. `kitty-streaming` keeps the texture of each replaced image. When the GPU
+no longer reads it, the next image of the same size goes into that texture. So
+no new texture is made for each frame.
 
 ## Link hover color
 
 `link-hover-color` colors a highlighted link: a URL or OSC 8 hyperlink under
 the mouse while ⌘ is held, or a `link` whose highlight condition matches.
-Unset, which is the default, a link is only underlined, as in Ghostty. Set, the
-link's text and underline take that color in place of the link's own
-foreground, so inverse video and `minimum-contrast` still apply to it. Selected
-text and search matches keep their own colors.
+By default the option is not set, and a link only gets an underline, as in
+Ghostty. When you set it, the link text and underline use this color instead of
+the link's own foreground color, so inverse video and `minimum-contrast` still
+apply to it. Selected text and search matches keep their own colors.
 
 ```ini
 link-hover-color = #0a84ff
@@ -85,13 +87,17 @@ link-hover-color = #0a84ff
 
 ## Ephemeral mode
 
-With `GHOSTTY_EPHEMERAL=1` in its environment when it starts, libghostty leaves
-nothing of its own on disk, for an embedder that promises its user as much (a
-private window, say): crash reporting doesn't start, so there's no per-run
-folder in the cache directory and no crash report in the state directory, and
-no template config file is written when none exists. It is read at init, like
-`GHOSTTY_LOG`, because crash reporting starts before any config is loaded.
-Unset, empty, `0` or `false` leave it off, the default.
+Set `GHOSTTY_EPHEMERAL=1` in the environment before libghostty starts, and it
+writes none of its own files to disk. An embedder can use this for a private
+window. When the mode is on:
+
+- Crash reporting does not start. No per-run folder goes into the cache
+  directory, and no crash report goes into the state directory.
+- No template config file is written when none exists.
+
+libghostty reads the variable at init, like `GHOSTTY_LOG`, because crash
+reporting starts before any config loads. It is off when the variable is unset
+(the default), empty, `0` or `false`.
 
 ## Building
 
@@ -110,16 +116,19 @@ zig build -Doptimize=ReleaseFast -Demit-xcframework=true \
 ## Updating
 
 A daily workflow ([`sync-upstream.yml`](.github/workflows/sync-upstream.yml))
-runs [`.github/sync-upstream.sh`](.github/sync-upstream.sh), which replays
-`pixel-scroll` and `kitty-streaming` onto the latest Ghostty `main`, then
-`scroll-fixes`, `seamless-resize` and `main` onto the new `pixel-scroll`,
-redoing the merges with the conflict resolutions they already had. Commits keep
-their authors and dates. The workflow pushes only when the replay is
-conflict-free, the tests pass and every branch builds. Each replaced `main` is
-kept under `refs/archive/`, so a commit pinned elsewhere stays fetchable.
-Otherwise nothing is pushed and an issue is opened, and the branches are
-rebased by hand. The push needs a `SYNC_TOKEN` secret: a fine-grained token for
-this repository with Contents and Workflows write access.
+runs [`.github/sync-upstream.sh`](.github/sync-upstream.sh). The script:
+
+1. Replays `pixel-scroll` and `kitty-streaming` onto the latest Ghostty `main`.
+2. Replays `scroll-fixes`, `seamless-resize` and `main` onto the new
+   `pixel-scroll`.
+3. Does the merges again, with the conflict resolutions of the old merges.
+
+Commits keep their authors and dates. The workflow pushes only when the replay
+has no conflicts, the tests pass and every branch builds. If not, it pushes
+nothing and opens an issue, and you rebase the branches by hand. Each replaced
+`main` stays under `refs/archive/`, so a commit pinned elsewhere stays
+fetchable. The push needs a `SYNC_TOKEN` secret: a fine-grained token for this
+repository with Contents and Workflows write access.
 
 Ian Kahn's repository is not followed; new commits there are brought over by
 hand.
@@ -135,7 +144,7 @@ branches don't carry the hook, so push them while `main` is checked out.
 - Smooth scrolling, Option-click, wrapped links and the compose box
   (`pixel-scroll`) by [Ian Kahn](https://github.com/lemur1905), adapting a
   proof of concept by [@pfgithub](https://github.com/pfgithub).
-- Scroll fixes, seamless resize, Kitty streaming, the link hover color and
+- Scroll fixes, live resize, Kitty streaming, the link hover color and
   ephemeral mode by [shexe](https://github.com/shexe).
 
 ## License
