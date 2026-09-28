@@ -80,6 +80,7 @@ pub fn init(opts: InitOpts) !void {
         .tmp_dir_path = null,
         .action = null,
         .logging = .{},
+        .ephemeral = false,
         .rlimits = .{},
         .resources_dir = .{},
     };
@@ -154,6 +155,17 @@ pub fn init(opts: InitOpts) !void {
         self.logging = cli.args.parsePackedStruct(GlobalState.Logging, v) catch .{};
     }
 
+    // Like GHOSTTY_LOG, this has to be known before the config is loaded:
+    // crash reporting starts right below.
+    ephemeral: {
+        const v = self.environ.getAlloc(self.alloc, "GHOSTTY_EPHEMERAL") catch |err| switch (err) {
+            error.EnvironmentVariableMissing => break :ephemeral,
+            else => return err,
+        };
+        defer self.alloc.free(v);
+        self.ephemeral = GlobalState.parseEphemeral(v);
+    }
+
     // Setup our signal handlers before logging
     GlobalState.initSignals();
 
@@ -180,7 +192,9 @@ pub fn init(opts: InitOpts) !void {
     // As early as possible, initialize our resource limits.
     self.rlimits = .init();
 
-    if (build_options.sentry) {
+    if (build_options.sentry and self.ephemeral) {
+        std.log.info("ephemeral, crash reporting disabled", .{});
+    } else if (build_options.sentry) {
         // Initialize our crash reporting. The environ map snapshot is
         // owned by crash.init (it is freed by the init thread).
         const environ_map = try self.environ.createMap(self.alloc);
@@ -364,6 +378,16 @@ pub fn logging() GlobalState.Logging {
     return state.?.logging;
 }
 
+/// Whether this process leaves nothing on disk (see
+/// `GlobalState.ephemeral`). Always false when testing.
+///
+/// Asserts that the global state is initialized when not running as a test.
+pub fn ephemeral() bool {
+    if (builtin.is_test) return false;
+
+    return state.?.ephemeral;
+}
+
 /// Returns the global state action.
 ///
 /// Asserts that the global state is initialized.
@@ -385,6 +409,20 @@ pub const GlobalState = struct {
     tmp_dir_path: ?[]const u8,
     action: ?cli.ghostty.Action,
     logging: Logging,
+
+    /// Whether this process should leave nothing of its own on disk, for an
+    /// embedder that promises its user as much (a private window, say). Set
+    /// by the GHOSTTY_EPHEMERAL environment variable, read at init because
+    /// crash reporting starts before any config is loaded:
+    ///
+    ///   * No crash reporting: Sentry isn't started, so there is no per-run
+    ///     folder in the cache directory and no crash report in the state
+    ///     directory (`ghostty +crash-report` lists none from this process).
+    ///   * No template config file is created when no config file exists.
+    ///
+    /// Unset, empty, `0` or `false` leave it off, the default.
+    ephemeral: bool,
+
     rlimits: ResourceLimits = .{},
 
     /// The app resources directory, equivalent to zig-out/share when we build
@@ -400,6 +438,16 @@ pub const GlobalState = struct {
         /// on macOS.
         macos: bool = builtin.os.tag.isDarwin(),
     };
+
+    /// Whether a GHOSTTY_EPHEMERAL value turns ephemeral mode on: anything
+    /// but empty, `0` or `false`.
+    fn parseEphemeral(value: []const u8) bool {
+        const trimmed = std.mem.trim(u8, value, " \t");
+        if (trimmed.len == 0) return false;
+        if (std.mem.eql(u8, trimmed, "0")) return false;
+        if (std.ascii.eqlIgnoreCase(trimmed, "false")) return false;
+        return true;
+    }
 
     /// Asserts that `self.io_impl` has been initialized.
     pub fn io(self: *GlobalState) std.Io {
@@ -444,3 +492,15 @@ pub const ResourceLimits = struct {
         if (self.nofile) |lim| internal_os.restoreMaxFiles(lim);
     }
 };
+
+test "GlobalState.parseEphemeral" {
+    const testing = std.testing;
+    try testing.expect(GlobalState.parseEphemeral("1"));
+    try testing.expect(GlobalState.parseEphemeral("true"));
+    try testing.expect(GlobalState.parseEphemeral("yes"));
+    try testing.expect(!GlobalState.parseEphemeral(""));
+    try testing.expect(!GlobalState.parseEphemeral(" "));
+    try testing.expect(!GlobalState.parseEphemeral("0"));
+    try testing.expect(!GlobalState.parseEphemeral("false"));
+    try testing.expect(!GlobalState.parseEphemeral("FALSE"));
+}

@@ -4349,14 +4349,15 @@ pub fn loadDefaultFiles(self: *Config, alloc: Allocator) !void {
         };
 
         // If both files are not found, then we create a template file.
-        // For macOS, we only create the template file in the app support
-        if (!app_support_loaded and !xdg_loaded) {
+        // For macOS, we only create the template file in the app support.
+        // An ephemeral process leaves nothing on disk (see global.ephemeral).
+        if (!app_support_loaded and !xdg_loaded and !global.ephemeral()) {
             writeConfigTemplate(app_support_path) catch |err| {
                 log.warn("error creating template config file err={}", .{err});
             };
         }
     } else {
-        if (!xdg_loaded) {
+        if (!xdg_loaded and !global.ephemeral()) {
             writeConfigTemplate(xdg_path) catch |err| {
                 log.warn("error creating template config file err={}", .{err});
             };
