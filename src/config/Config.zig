@@ -1491,6 +1491,21 @@ link: RepeatableLink = .{},
 /// Available since: 1.2.0
 @"link-previews": LinkPreviews = .true,
 
+/// The color of a highlighted link's text and underline. A link is
+/// highlighted when it is underlined: a URL or an OSC 8 hyperlink under the
+/// mouse while command (macOS) or control (other platforms) is held, or any
+/// `link` whose highlight condition matches.
+///
+/// Specified as either hex (`#RRGGBB` or `RRGGBB`) or a named X11 color. If
+/// this is not set, a highlighted link keeps its own colors and is only
+/// underlined.
+///
+/// The color takes the place of the link's own foreground color, so the rest
+/// of the cell's styling still applies on top of it: inverse video swaps it
+/// with the background, and `minimum-contrast` adjusts it like any other text
+/// color. Selected text and search matches keep their own colors.
+@"link-hover-color": ?Color = null,
+
 /// Whether to start the window in a maximized state. This setting applies
 /// to new windows and does not apply to tabs, splits, etc. However, this setting
 /// will apply to all new windows, not just the first one.
@@ -11046,6 +11061,100 @@ test "theme priority is lower than config" {
         .g = 0xCD,
         .b = 0xEF,
     }, cfg.background);
+}
+
+test "link-hover-color" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Unset by default, so links are only underlined.
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        try cfg.finalize();
+        try testing.expect(cfg.@"link-hover-color" == null);
+    }
+
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        var it: TestIterator = .{ .data = &.{"--link-hover-color=#0A84FF"} };
+        try cfg.loadIter(alloc, &it);
+        try cfg.finalize();
+        try testing.expectEqual(
+            Color{ .r = 0x0A, .g = 0x84, .b = 0xFF },
+            cfg.@"link-hover-color".?,
+        );
+    }
+
+    // An empty value unsets it again.
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        var it: TestIterator = .{ .data = &.{
+            "--link-hover-color=blue",
+            "--link-hover-color=",
+        } };
+        try cfg.loadIter(alloc, &it);
+        try cfg.finalize();
+        try testing.expect(cfg.@"link-hover-color" == null);
+    }
+}
+
+test "link-hover-color from a theme is lower priority than config" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    var arena = ArenaAllocator.init(alloc);
+    defer arena.deinit();
+    const alloc_arena = arena.allocator();
+
+    var td = try internal_os.TempDir.init();
+    defer td.deinit();
+    var buf: [4096]u8 = undefined;
+    {
+        var file = try td.dir.createFile(testing.io, "theme", .{});
+        defer file.close(testing.io);
+        var writer = file.writer(testing.io, &buf);
+        try writer.interface.writeAll("link-hover-color = #0A84FF\n");
+        try writer.end();
+    }
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path = path_buf[0..try td.dir.realPathFile(testing.io, "theme", &path_buf)];
+    const theme = try std.fmt.allocPrint(alloc_arena, "--theme={s}", .{path});
+
+    // The theme's color applies when the config doesn't set one.
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        var it: TestIterator = .{ .data = &.{theme} };
+        try cfg.loadIter(alloc, &it);
+        try cfg.finalize();
+        try testing.expectEqual(
+            Color{ .r = 0x0A, .g = 0x84, .b = 0xFF },
+            cfg.@"link-hover-color".?,
+        );
+    }
+
+    // The config's own value wins, including an empty one.
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        var it: TestIterator = .{ .data = &.{ "--link-hover-color=#FF0000", theme } };
+        try cfg.loadIter(alloc, &it);
+        try cfg.finalize();
+        try testing.expectEqual(
+            Color{ .r = 0xFF, .g = 0, .b = 0 },
+            cfg.@"link-hover-color".?,
+        );
+    }
+    {
+        var cfg = try Config.default(alloc);
+        defer cfg.deinit();
+        var it: TestIterator = .{ .data = &.{ "--link-hover-color=", theme } };
+        try cfg.loadIter(alloc, &it);
+        try cfg.finalize();
+        try testing.expect(cfg.@"link-hover-color" == null);
+    }
 }
 
 test "theme loading correct light/dark" {

@@ -776,6 +776,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             search_selected_background: configpkg.Config.TerminalColor,
             search_selected_foreground: configpkg.Config.TerminalColor,
             bold_color: ?terminal.Style.BoldColor,
+            link_hover_color: ?terminal.color.RGB,
             faint_opacity: u8,
             min_contrast: f32,
             padding_color: configpkg.WindowPaddingColor,
@@ -842,6 +843,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     .background = config.background.toTerminalRGB(),
                     .foreground = config.foreground.toTerminalRGB(),
                     .bold_color = if (config.@"bold-color") |b| b.toTerminal() else null,
+                    .link_hover_color = if (config.@"link-hover-color") |c| c.toTerminalRGB() else null,
                     .faint_opacity = @intFromFloat(@ceil(config.@"faint-opacity" * 255)),
 
                     .min_contrast = @floatCast(config.@"minimum-contrast"),
@@ -3683,7 +3685,25 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     cell,
                     &state.colors.palette,
                 );
-                const fg_style = style.fg(.{
+
+                // Whether this cell is part of a highlighted (underlined)
+                // link: a hovered URL or OSC 8 hyperlink, or a configured
+                // link whose highlight condition matches.
+                const link_highlighted = links.contains(.{
+                    .x = @intCast(x),
+                    .y = @intCast(y),
+                });
+
+                // With `link-hover-color` set, a highlighted link draws in
+                // that color in place of its style's foreground. It stands
+                // in for the style color only, so selection, search
+                // highlights and inverse video still apply on top of it.
+                const link_fg: ?terminal.color.RGB = if (link_highlighted)
+                    self.config.link_hover_color
+                else
+                    null;
+
+                const fg_style = link_fg orelse style.fg(.{
                     .default = state.colors.foreground,
                     .palette = &state.colors.palette,
                     .bold = self.config.bold_color,
@@ -3822,10 +3842,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                 // an underline, in which case use a double underline to
                 // distinguish them.
                 const underline: terminal.Attribute.Underline = underline: {
-                    if (links.contains(.{
-                        .x = @intCast(x),
-                        .y = @intCast(y),
-                    })) {
+                    if (link_highlighted) {
                         break :underline if (style.flags.underline == .single)
                             .double
                         else
@@ -3834,6 +3851,13 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     break :underline style.flags.underline;
                 };
 
+                // A link drawn in `link-hover-color` has its underline match
+                // its text, even if the cell sets its own underline color.
+                const underline_color = if (link_fg != null)
+                    fg
+                else
+                    style.underlineColor(&state.colors.palette) orelse fg;
+
                 // We draw underlines first so that they layer underneath text.
                 // This improves readability when a colored underline is used
                 // which intersects parts of the text (descenders).
@@ -3841,7 +3865,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     @intCast(x),
                     @intCast(y),
                     underline,
-                    style.underlineColor(&state.colors.palette) orelse fg,
+                    underline_color,
                     alpha,
                 ) catch |err| {
                     log.warn(
@@ -4266,4 +4290,30 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             try texture.replaceRegion(0, 0, atlas.size, atlas.size, atlas.data);
         }
     };
+}
+
+test "DerivedConfig link-hover-color" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const DerivedConfig = renderer.Renderer.DerivedConfig;
+
+    var config = try configpkg.Config.default(alloc);
+    defer config.deinit();
+
+    // Unset by default, so highlighted links keep their own colors.
+    {
+        var derived = try DerivedConfig.init(alloc, &config);
+        defer derived.deinit();
+        try testing.expect(derived.link_hover_color == null);
+    }
+
+    config.@"link-hover-color" = .{ .r = 0x0A, .g = 0x84, .b = 0xFF };
+    {
+        var derived = try DerivedConfig.init(alloc, &config);
+        defer derived.deinit();
+        try testing.expectEqual(
+            terminal.color.RGB{ .r = 0x0A, .g = 0x84, .b = 0xFF },
+            derived.link_hover_color.?,
+        );
+    }
 }
