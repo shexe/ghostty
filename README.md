@@ -70,6 +70,19 @@ frame. `kitty-streaming` uploads each frame into the texture a replaced image
 of the same size used, once the GPU is done with it, instead of allocating a
 new texture every frame.
 
+## Link hover color
+
+`link-hover-color` colors a highlighted link: a URL or OSC 8 hyperlink under
+the mouse while ⌘ is held, or a `link` whose highlight condition matches.
+Unset, which is the default, a link is only underlined, as in Ghostty. Set, the
+link's text and underline take that color in place of the link's own
+foreground, so inverse video and `minimum-contrast` still apply to it. Selected
+text and search matches keep their own colors.
+
+```ini
+link-hover-color = #0a84ff
+```
+
 ## Building
 
 Requires full Xcode, [Zig](https://ziglang.org) 0.16 and the Metal toolchain
@@ -112,7 +125,7 @@ branches don't carry the hook, so push them while `main` is checked out.
 - Smooth scrolling, Option-click, wrapped links and the compose box
   (`pixel-scroll`) by [Ian Kahn](https://github.com/lemur1905), adapting a
   proof of concept by [@pfgithub](https://github.com/pfgithub).
-- Scroll fixes, seamless resize and Kitty streaming by
+- Scroll fixes, seamless resize, Kitty streaming and the link hover color by
   [shexe](https://github.com/shexe).
 
 ## License
