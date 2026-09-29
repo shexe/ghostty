@@ -8,6 +8,21 @@
 
 set -eu
 
+# An author or committer named shexe must have GitHub's noreply address, so
+# no personal email goes into the history. Upstream authors are not checked. A commit that keeps another
+# author (a cherry-pick, an amend) is checked again as it is pushed.
+noreply="$(git config user.email)"
+for role in AUTHOR COMMITTER; do
+    ident=$(git var "GIT_${role}_IDENT")
+    name=${ident%% <*}
+    email=$(printf '%s\n' "$ident" | sed -E 's/.*<([^>]*)>.*/\1/')
+    if [ "$name" = shexe ] && [ "$email" != "$noreply" ]; then
+        echo "pre-commit: the commit's $(echo "$role" | tr 'A-Z' 'a-z') email is not $noreply." >&2
+        echo "pre-commit: set it with git config user.email $noreply." >&2
+        exit 1
+    fi
+done
+
 host="$(scutil --get LocalHostName 2>/dev/null || hostname -s 2>/dev/null || echo '')"
 
 placeholders='example|you|yourname|user|username|name|foo|bar|someone|me'
