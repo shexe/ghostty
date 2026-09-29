@@ -232,7 +232,7 @@ pub fn acquireDrawable(
     height: usize,
     main_render_serial: u64,
 ) !Drawable {
-    var drawable = try acquireDrawableState(self.state, width, height);
+    var drawable = try acquireDrawableState(self.state, width, height, 2);
     drawable.main_render_serial = main_render_serial;
     return drawable;
 }
@@ -486,16 +486,23 @@ fn requestNativeRedrawState(state: *PresentationState) void {
     }
 }
 
+/// Take a drawable slot and a drawable. `limit` is the most slots that may be
+/// taken already (see `holdUntilPresented`): 2 for a present inside a
+/// transaction (a live resize), which waits for the frame in any case, and 1
+/// for an ordinary present, so that the main thread asks for a drawable only
+/// while no frame waits in the window server's queue. A frame that finds no
+/// slot waits in the mailbox, and a newer frame replaces it there.
 fn acquireDrawableState(
     state: *PresentationState,
     width: usize,
     height: usize,
+    limit: u8,
 ) !Drawable {
     std.debug.assert(isMainThread());
 
     var update_format = false;
     state.mutex.lockUncancelable(global.io());
-    if (!drawableAdmissionReadyLocked(state)) {
+    if (!drawableAdmissionReadyLocked(state) or state.drawables_outstanding >= limit) {
         state.mutex.unlock(global.io());
         return error.DrawableBusy;
     }
@@ -520,6 +527,9 @@ fn acquireDrawableState(
         .width = width,
         .height = height,
     });
+    // The slot stays taken until the drawable is on screen or dropped, so a
+    // later nextDrawable does not wait for the window server.
+    lease.holdUntilPresented(settlement);
     return .{ .lease = lease, .settlement = settlement };
 }
 
@@ -609,7 +619,8 @@ const CopyCompletion = struct {
     surface: *IOSurface,
     texture: objc.Object,
     /// Holds one of the two drawable slots. The slot is free again after the
-    /// GPU completes and the main thread presents or discards the drawable.
+    /// GPU completes, the main thread presents or discards the drawable, and
+    /// the drawable is on screen or dropped.
     settlement: objc.Object,
 
     fn arrive(self: *CopyCompletion, party: DrawableLease.CompletionGate.Party) void {
@@ -659,6 +670,7 @@ fn presentPending(
         state,
         pending.surface.getWidth(),
         pending.surface.getHeight(),
+        if (transactional) 2 else 1,
     ) catch |err| return if (err == error.DrawableBusy) .deferred else .rejected;
     defer drawable.release();
     if (drawableAcceptance(
@@ -743,7 +755,10 @@ fn restorePendingLocked(state: *PresentationState, pending: Pending) bool {
 }
 
 fn signalRestoredIfReadyLocked(state: *PresentationState) void {
-    if (!drawableAdmissionReadyLocked(state)) return;
+    // A frame that waits for a slot runs again when a slot is free (see
+    // `settleDrawableOwner`). Signal now only when no slot is taken, or the
+    // source would run again at once and find no slot again.
+    if (!drawableAdmissionReadyLocked(state) or state.drawables_outstanding != 0) return;
     const source = state.source orelse return;
     cf.CFRunLoopSourceSignal(source);
     cf.CFRunLoopWakeUp(cf.CFRunLoopGetMain());

@@ -1,7 +1,8 @@
 //! Helpers for CAMetalLayer drawables. The renderer keeps its IOSurface targets
 //! and copies the final pixels 1:1 into a drawable of the same size. A drawable
-//! slot is free again only after the GPU completes and the main thread presents
-//! or discards the drawable.
+//! slot is free again only after the GPU completes, the main thread presents or
+//! discards the drawable, and the drawable is on screen or dropped (see
+//! `holdUntilPresented`).
 const Self = @This();
 const std = @import("std");
 const objc = @import("objc");
@@ -77,6 +78,30 @@ pub fn release(self: *Self) void {
     self.drawable.release();
     self.* = undefined;
 }
+
+const PresentedBlock = objc.Block(struct {
+    owner: objc.c.id,
+}, .{objc.c.id}, void);
+
+/// Keep `owner` until the drawable is on screen, or until Core Animation
+/// drops it. The block retains `owner`. Metal releases the block after it
+/// calls it, or when the drawable is freed without a present.
+///
+/// The layer has three drawables. One is on screen, and a drawable that is
+/// presented stays in use until the window server shows it. When the window
+/// server is slow (it draws fewer frames than the renderer makes), presented
+/// drawables wait in its queue. If a drawable slot were free when the GPU copy
+/// completes, the main thread would ask for a third drawable while two wait,
+/// and `nextDrawable` would block the main thread until one is free. With this
+/// hold, the slot is free again only when the drawable leaves the queue. So the
+/// main thread asks only when a drawable is free, and a new frame waits in the
+/// mailbox instead.
+pub fn holdUntilPresented(self: *const Self, owner: objc.Object) void {
+    var block = PresentedBlock.init(.{ .owner = owner.value }, &drawablePresented);
+    self.drawable.msgSend(void, objc.sel("addPresentedHandler:"), .{&block});
+}
+
+fn drawablePresented(_: *const PresentedBlock.Context, _: objc.c.id) callconv(.c) void {}
 
 /// Encode after all render/custom-shader/edge-extension encoders end and before
 /// command-buffer commit. No resizing, filtering, or colorspace conversion.
