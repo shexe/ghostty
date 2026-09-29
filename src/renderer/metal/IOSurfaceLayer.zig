@@ -78,6 +78,10 @@ const PresentationState = struct {
     main_render_requested_serial: u64 = 0,
     main_render_serviced_serial: u64 = 0,
     notification_link: ?objc.Object = null,
+    /// When the last ordinary present was made (CFAbsoluteTime), and whether
+    /// a timer will run the source again (see `paceWait`). Main thread only.
+    last_present: f64 = 0,
+    pace_timer_armed: bool = false,
 
     fn retain(self: *PresentationState) void {
         _ = self.refs.fetchAdd(1, .monotonic);
@@ -719,6 +723,7 @@ fn presentPending(
     const published = if (transactional)
         presentDrawable(state, &drawable, buffer, pending.frame_id)
     else published: {
+        state.last_present = cf.CFAbsoluteTimeGetCurrent();
         state.latest_accepted_id = pending.frame_id;
         state.presented_pixel_width = @intCast(drawable.lease.extent.width);
         state.presented_pixel_height = @intCast(drawable.lease.extent.height);
@@ -831,6 +836,14 @@ fn drainPresentationState(
         if (display_now) setNeedsDisplay(state);
         return .empty;
     }
+    if (!native_callback and state.pending != null and !state.detached) {
+        const wait = paceWait(state);
+        if (wait > 0) {
+            state.mutex.unlock(global.io());
+            armPaceTimer(state, wait);
+            return .empty;
+        }
+    }
     const pending = state.pending;
     state.pending = null;
     const native_redraw = state.native_redraw_needed;
@@ -863,6 +876,84 @@ fn drainPresentationState(
             serviceNativeRedraw(state, native_callback);
     }
     return status;
+}
+
+/// How long an ordinary present must still wait, in seconds, so that the
+/// main thread presents at most one frame per refresh of the fastest screen.
+///
+/// The renderer can finish frames faster than the screen shows them, for
+/// example for fast output with no display link. The window server holds the
+/// drawable on screen and the one it just replaced until the next refresh. So
+/// a second present in one refresh takes the last free drawable, and a third
+/// makes `nextDrawable` block the main thread until the refresh (1 to 7 ms
+/// seen). A frame that comes too soon waits in the mailbox, where a newer
+/// frame replaces it, and the source runs again at the right time.
+fn paceWait(state: *const PresentationState) f64 {
+    const interval = refreshInterval() * 0.9;
+    const wait = state.last_present + interval - cf.CFAbsoluteTimeGetCurrent();
+    return if (wait > 0 and wait <= interval) wait else 0;
+}
+
+/// The refresh interval of the fastest screen, read again at most once a
+/// second. 1/120 s when no screen tells it. Main thread only.
+fn refreshInterval() f64 {
+    const S = struct {
+        var value: f64 = 1.0 / 120.0;
+        var read_at: f64 = -1e9;
+    };
+    const now = cf.CFAbsoluteTimeGetCurrent();
+    if (now - S.read_at < 1) return S.value;
+    S.read_at = now;
+    const NSScreen = objc.getClass("NSScreen") orelse return S.value;
+    const screens = NSScreen.msgSend(objc.Object, objc.sel("screens"), .{});
+    const count = screens.getProperty(c_ulong, "count");
+    var fastest: f64 = 0;
+    var i: c_ulong = 0;
+    while (i < count) : (i += 1) {
+        const screen = screens.msgSend(objc.Object, objc.sel("objectAtIndex:"), .{i});
+        const interval = screen.getProperty(f64, "minimumRefreshInterval");
+        if (interval > 0 and (fastest == 0 or interval < fastest)) fastest = interval;
+    }
+    if (fastest > 0) S.value = fastest;
+    return S.value;
+}
+
+/// Run the source again in `delay` seconds, once, in the common modes.
+fn armPaceTimer(state: *PresentationState, delay: f64) void {
+    std.debug.assert(isMainThread());
+    if (state.pace_timer_armed) return;
+    var context: cf.CFRunLoopTimerContext = .{
+        .version = 0,
+        .info = state,
+        .retain = &presentationStateRetain,
+        .release = &presentationStateRelease,
+        .copyDescription = null,
+    };
+    const timer = cf.CFRunLoopTimerCreate(
+        null,
+        cf.CFAbsoluteTimeGetCurrent() + delay,
+        0,
+        0,
+        0,
+        &paceTimerFired,
+        &context,
+    ) orelse return;
+    state.pace_timer_armed = true;
+    cf.CFRunLoopAddTimer(cf.CFRunLoopGetMain(), timer, cf.kCFRunLoopCommonModes);
+    cf.CFRelease(timer);
+}
+
+fn paceTimerFired(_: cf.CFRunLoopTimerRef, info: ?*anyopaque) callconv(.c) void {
+    const state: *PresentationState = @ptrCast(@alignCast(info.?));
+    state.pace_timer_armed = false;
+    state.mutex.lockUncancelable(global.io());
+    const source = if (state.detached) null else state.source;
+    if (source) |value| _ = cf.CFRetain(value);
+    state.mutex.unlock(global.io());
+    if (source) |value| {
+        signalPresentationSource(value);
+        cf.CFRelease(value);
+    }
 }
 
 fn serviceNativeRedraw(state: *PresentationState, native_callback: bool) void {
