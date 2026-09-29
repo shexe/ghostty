@@ -30,4 +30,29 @@ case "$remote_url" in
         ;;
 esac
 
+# Every commit that this push sends with an author or committer named shexe
+# must have GitHub's noreply address there, so no personal email is
+# published. Upstream authors are not checked. The commit's SHA is named,
+# not the email it has.
+noreply="$(git config user.email)"
+zero=0000000000000000000000000000000000000000
+bad=""
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ "$local_sha" = "$zero" ] && continue
+    if [ "$remote_sha" = "$zero" ]; then
+        range="$local_sha --not --remotes=$1"
+    else
+        range="$remote_sha..$local_sha"
+    fi
+    # shellcheck disable=SC2086
+    bad="$bad$(git log --format='%H%x09%an%x09%ae%x09%cn%x09%ce' $range |
+        awk -F '\t' -v a="$noreply" '($2 == "shexe" && $3 != a) || ($4 == "shexe" && $5 != a) { print " " $1 }')"
+done
+if [ -n "$bad" ]; then
+    echo "pre-push: these commits have an author or committer email other than $noreply:" >&2
+    for c in $bad; do printf '  %s\n' "$c" >&2; done
+    echo "pre-push: rewrite them as shexe <$noreply>, then push again." >&2
+    exit 1
+fi
+
 exit 0
