@@ -446,6 +446,20 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// so the renderer keeps preparing frames until it lands.
         scroll_slide_active: bool = false,
 
+        /// True when a prepared frame moved the viewport through the
+        /// scrollback (a scroll or a slide), until the next draw takes it.
+        /// Such a frame is presented at once, not paced. Written and read
+        /// with draw_mutex held.
+        viewport_moved: bool = false,
+
+        /// True while an animation (see `animationWake`) needs more frames.
+        /// Its frames are presented at once too. Written and read with
+        /// draw_mutex held.
+        animating: bool = false,
+
+        /// The sub-cell scroll offset of the last prepared frame.
+        prepared_scroll_offset: f64 = 0,
+
         const HighlightTag = enum(u8) {
             search_match,
             search_match_selected,
@@ -1293,6 +1307,11 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             };
         };
 
+        /// Whether the viewport of `scrollbar` shows the last rows.
+        fn scrollbarAtBottom(scrollbar: terminal.Scrollbar) bool {
+            return scrollbar.offset + scrollbar.len >= scrollbar.total;
+        }
+
         /// The soonest animation wake this renderer needs, if any:
         /// custom shader animation wants continuous draw-only wakes
         /// at draw_interval_ms while active, and a running Kitty
@@ -2010,6 +2029,19 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     self.prepared_font_revision = self.active_font_revision;
                 }
 
+                // A frame that moves the viewport through the scrollback (a
+                // scroll or a slide) is presented at once. A viewport that is
+                // at the bottom before and after moves only with output, and
+                // its frames are paced as before.
+                const viewport_offset_changed = self.scrollbar.offset != critical.scrollbar.offset;
+                const stays_at_bottom = scrollbarAtBottom(self.scrollbar) and
+                    scrollbarAtBottom(critical.scrollbar);
+                if (critical.scroll_offset != self.prepared_scroll_offset or
+                    (viewport_offset_changed and !stays_at_bottom))
+                    self.viewport_moved = true;
+                self.prepared_scroll_offset = critical.scroll_offset;
+                self.animating = self.animationWake() != null;
+
                 // The scrollbar is only emitted during draws so we also
                 // check the scrollbar cache here and update if needed.
                 // This is pretty fast.
@@ -2355,9 +2387,14 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             // is replaced rather than redrawn next time.
             if (comptime @hasDecl(Target, "markPublished")) frame.target.markPublished();
 
+            // A frame that moves the viewport or animates is presented at
+            // once (see `viewport_moved`).
+            const motion = self.viewport_moved or self.animating;
+            self.viewport_moved = false;
+
             // Get a frame context from the graphics API.
             var frame_ctx = if (comptime GraphicsAPI == renderer.Metal)
-                try self.api.beginFrame(self, &frame.target, lease.token, drawable)
+                try self.api.beginFrame(self, &frame.target, lease.token, drawable, motion)
             else
                 try self.api.beginFrame(self, &frame.target, lease.token);
             lease_owned = false;

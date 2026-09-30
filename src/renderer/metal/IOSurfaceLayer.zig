@@ -18,11 +18,14 @@ const Pending = struct {
     surface: *IOSurface,
     texture: objc.Object,
     frame_id: u64,
+    /// The frame moves the viewport or animates, so it is presented at once
+    /// (see `paceWait`).
+    motion: bool,
 
-    fn init(surface: *IOSurface, texture: objc.Object, frame_id: u64) Pending {
+    fn init(surface: *IOSurface, texture: objc.Object, frame_id: u64, motion: bool) Pending {
         surface.retain();
         _ = texture.retain();
-        return .{ .surface = surface, .texture = texture, .frame_id = frame_id };
+        return .{ .surface = surface, .texture = texture, .frame_id = frame_id, .motion = motion };
     }
 
     fn release(self: Pending) void {
@@ -299,14 +302,16 @@ pub fn lastPresentedPixelSize(self: *IOSurfaceLayer) struct { width: u32, height
 
 /// Submit a completed target. Off the main thread the frame goes through the
 /// one-slot mailbox; on it, the frame is presented directly unless a live
-/// resize coalesces presentation into the next display callback.
+/// resize coalesces presentation into the next display callback. A `motion`
+/// frame (it moves the viewport or animates) is not paced.
 pub fn setTarget(
     self: *IOSurfaceLayer,
     surface: *IOSurface,
     texture: objc.Object,
     frame_id: u64,
+    motion: bool,
 ) void {
-    const pending = Pending.init(surface, texture, frame_id);
+    const pending = Pending.init(surface, texture, frame_id, motion);
     if (!isMainThread()) {
         if (!enqueuePending(self.state, pending)) pending.release();
         signalPresentationSource(self.source);
@@ -332,7 +337,7 @@ pub fn setTargetSync(
     frame_id: u64,
 ) void {
     std.debug.assert(isMainThread());
-    presentOrRestore(self.state, Pending.init(surface, texture, frame_id), true);
+    presentOrRestore(self.state, Pending.init(surface, texture, frame_id, false), true);
 }
 
 /// True while the host is in a live window resize.
@@ -857,7 +862,8 @@ fn drainPresentationState(
         if (display_now) setNeedsDisplay(state);
         return .empty;
     }
-    if (!native_callback and state.pending != null and !state.detached) {
+    const paced = if (state.pending) |p| !p.motion else false;
+    if (!native_callback and paced and !state.detached) {
         const wait = paceWait(state);
         if (wait > 0) {
             state.mutex.unlock(global.io());
@@ -909,6 +915,11 @@ fn drainPresentationState(
 /// makes `nextDrawable` block the main thread until the refresh (1 to 7 ms
 /// seen). A frame that comes too soon waits in the mailbox, where a newer
 /// frame replaces it, and the source runs again at the right time.
+///
+/// A frame that moves the viewport (a scroll, a slide) or animates is not
+/// paced: a wait can make it miss its refresh, and then the motion
+/// stutters. The drawable slots (see `ordinary_slot_limit`) keep such frames
+/// from blocking the main thread in `nextDrawable`.
 fn paceWait(state: *const PresentationState) f64 {
     const interval = refreshInterval() * 0.9;
     const wait = state.last_present + interval - cf.CFAbsoluteTimeGetCurrent();

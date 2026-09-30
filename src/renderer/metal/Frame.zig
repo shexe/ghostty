@@ -68,6 +68,8 @@ pub fn begin(
     frame_id: u64,
     token: Renderer.FrameToken,
     drawable: *?Drawable,
+    /// The frame moves the viewport or animates, so it is not paced.
+    motion: bool,
 ) !Self {
     const buffer = opts.queue.msgSend(
         objc.Object,
@@ -83,6 +85,7 @@ pub fn begin(
             .target = target,
             .frame_id = frame_id,
             .token = token,
+            .motion = motion,
         },
         &bufferCompleted,
     );
@@ -105,6 +108,7 @@ const CompletionBlock = objc.Block(struct {
     target: *Target,
     frame_id: u64,
     token: Renderer.FrameToken,
+    motion: bool,
 }, .{
     objc.c.id, // MTLCommandBuffer
 }, void);
@@ -135,6 +139,7 @@ fn finishCompleted(
             block.target.*,
             block.frame_id,
             sync,
+            block.motion,
         ) catch |err| {
             log.err("Failed to present render target: err={}", .{err});
         };

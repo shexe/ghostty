@@ -335,17 +335,19 @@ pub fn initTarget(self: *const Metal, width: usize, height: usize) !Target {
     });
 }
 
-/// Submit the provided target's contents to the layer.
+/// Submit the provided target's contents to the layer. A `motion` frame
+/// (it moves the viewport or animates) is presented without a pace wait.
 pub inline fn present(
     self: *Metal,
     target: Target,
     frame_id: u64,
     sync: bool,
+    motion: bool,
 ) !void {
     if (sync) {
         self.layer.setTargetSync(target.surface, target.texture, frame_id);
     } else {
-        self.layer.setTarget(target.surface, target.texture, frame_id);
+        self.layer.setTarget(target.surface, target.texture, frame_id, motion);
     }
 }
 
@@ -527,6 +529,8 @@ pub inline fn beginFrame(
     target: *Target,
     token: Renderer.FrameToken,
     drawable: *?DrawableLease,
+    /// The frame moves the viewport or animates (see `present`).
+    motion: bool,
 ) !Frame {
     std.debug.assert(self.next_frame_id < std.math.maxInt(u64));
     self.next_frame_id += 1;
@@ -537,6 +541,7 @@ pub inline fn beginFrame(
         self.next_frame_id,
         token,
         drawable,
+        motion,
     );
 }
 
