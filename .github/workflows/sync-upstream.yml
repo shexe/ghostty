@@ -47,7 +47,9 @@ jobs:
       - name: Configure git
         run: |
           git config core.hooksPath .githooks
-          git config user.name shexe
+          # The owner of this repository, with GitHub's noreply address: the
+          # identity that the hooks allow (see .githooks/identity).
+          git config user.name "${{ github.repository_owner }}"
           git config user.email "${{ github.repository_owner }}@users.noreply.github.com"
           git remote add upstream https://github.com/ghostty-org/ghostty.git
           git remote set-url --push upstream no-push-to-original

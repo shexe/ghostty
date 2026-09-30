@@ -30,28 +30,34 @@ case "$remote_url" in
         ;;
 esac
 
-# Every commit that this push sends with an author or committer named shexe
-# must have GitHub's noreply address there, so no personal email is
-# published. Upstream authors are not checked. The commit's SHA is named,
-# not the email it has.
-noreply="$(git config user.email)"
+# Every commit that this push sends, and that no other remote has (Ghostty
+# and the other forks), must have the identity in git config user.name and
+# user.email as its committer (see .githooks/identity). Its author must be
+# that identity too, unless it is another person's. An author or committer
+# with the allowed name and another email is rejected, so no personal email
+# is published. The commit's SHA is named, not the email it has.
+. "$(dirname "$0")/identity"
+allowed_identity pre-push
+others=$(git for-each-ref --format='%(refname)' refs/remotes | grep -v "^refs/remotes/$remote_name/" || true)
 zero=0000000000000000000000000000000000000000
 bad=""
 while read -r local_ref local_sha remote_ref remote_sha; do
     [ "$local_sha" = "$zero" ] && continue
-    if [ "$remote_sha" = "$zero" ]; then
-        range="$local_sha --not --remotes=$1"
+    if [ "$remote_sha" = "$zero" ] || ! git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+        range="$local_sha --not --remotes=$remote_name"
     else
-        range="$remote_sha..$local_sha"
+        range="$remote_sha..$local_sha --not"
     fi
     # shellcheck disable=SC2086
-    bad="$bad$(git log --format='%H%x09%an%x09%ae%x09%cn%x09%ce' $range |
-        awk -F '\t' -v a="$noreply" '($2 == "shexe" && $3 != a) || ($4 == "shexe" && $5 != a) { print " " $1 }')"
+    bad="$bad$(git log --format='%H%x09%an%x09%ae%x09%cn%x09%ce' $range $others |
+        awk -F '\t' -v n="$allowed_name" -v e="$allowed_email" '
+            $4 != n || $5 != e { print " " $1; next }
+            ($2 == n || $3 == e) && ($2 != n || $3 != e) { print " " $1 }')"
 done
 if [ -n "$bad" ]; then
-    echo "pre-push: these commits have an author or committer email other than $noreply:" >&2
+    echo "pre-push: these commits have an author or committer other than git config user.name and user.email:" >&2
     for c in $bad; do printf '  %s\n' "$c" >&2; done
-    echo "pre-push: rewrite them as shexe <$noreply>, then push again." >&2
+    echo "pre-push: rewrite them with that identity, then push again." >&2
     exit 1
 fi
 

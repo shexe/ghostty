@@ -1,0 +1,26 @@
+# The identity that commits in this repository must have. The hooks read it
+# with ". .githooks/identity" and then call allowed_identity with their name.
+#
+# It is user.name and user.email in the git config. The email must be a
+# GitHub noreply address (name@users.noreply.github.com or
+# 123+name@users.noreply.github.com), so no personal email is published.
+# No name or email is written here: each clone sets its own, for example
+# with: git config user.email "$(git log -1 --format=%ae)".
+
+noreply_pattern='^([0-9]+[+])?[A-Za-z0-9-]+@users[.]noreply[.]github[.]com$'
+
+# Set allowed_name and allowed_email, or stop with a message that says what
+# to set.
+allowed_identity() {
+    allowed_name=$(git config user.name || true)
+    allowed_email=$(git config user.email || true)
+    if [ -z "$allowed_name" ] || [ -z "$allowed_email" ]; then
+        echo "$1: set user.name and user.email in this repository's git config first." >&2
+        echo "$1: for example: git config user.email \"\$(git log -1 --format=%ae)\"" >&2
+        exit 1
+    fi
+    if ! printf '%s\n' "$allowed_email" | grep -Eq "$noreply_pattern"; then
+        echo "$1: git config user.email is not a GitHub noreply address (name@users.noreply.github.com)." >&2
+        exit 1
+    fi
+}

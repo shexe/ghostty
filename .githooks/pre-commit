@@ -1,5 +1,6 @@
 #!/bin/sh
-# Reject staged changes that add a path on this machine or its hostname.
+# Reject staged changes that add a path on this machine or its hostname,
+# and a commit whose identity is not the one this repository allows.
 #
 # Flags added lines containing a home directory path (/Users/<name>/ or
 # /home/<name>/), a personal ~/<dir>/ path, or this machine's .local hostname.
@@ -8,17 +9,25 @@
 
 set -eu
 
-# An author or committer named shexe must have GitHub's noreply address, so
-# no personal email goes into the history. Upstream authors are not checked. A commit that keeps another
-# author (a cherry-pick, an amend) is checked again as it is pushed.
-noreply="$(git config user.email)"
+# The allowed identity is user.name and user.email in the git config of this
+# repository (see .githooks/identity). The committer must be it, and the email
+# must be a GitHub noreply address. The author must be it too, unless it is
+# another person's (a commit of Ghostty or of another fork, cherry-picked). An
+# author with the allowed name and another email is rejected, so no personal
+# email goes into the history. A commit that keeps another author (a
+# cherry-pick, an amend) is checked again as it is pushed.
+. "$(dirname "$0")/identity"
+allowed_identity pre-commit
 for role in AUTHOR COMMITTER; do
     ident=$(git var "GIT_${role}_IDENT")
     name=${ident%% <*}
     email=$(printf '%s\n' "$ident" | sed -E 's/.*<([^>]*)>.*/\1/')
-    if [ "$name" = shexe ] && [ "$email" != "$noreply" ]; then
-        echo "pre-commit: the commit's $(echo "$role" | tr 'A-Z' 'a-z') email is not $noreply." >&2
-        echo "pre-commit: set it with git config user.email $noreply." >&2
+    own=0
+    [ "$name" = "$allowed_name" ] || [ "$email" = "$allowed_email" ] && own=1
+    if { [ "$role" = COMMITTER ] || [ "$own" = 1 ]; } &&
+        { [ "$name" != "$allowed_name" ] || [ "$email" != "$allowed_email" ]; }; then
+        echo "pre-commit: the commit's $(echo "$role" | tr 'A-Z' 'a-z') is not the identity in git config user.name and user.email." >&2
+        echo "pre-commit: do not override the identity for one commit (-c user.email, GIT_AUTHOR_EMAIL)." >&2
         exit 1
     fi
 done
