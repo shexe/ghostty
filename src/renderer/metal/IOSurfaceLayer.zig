@@ -447,9 +447,30 @@ fn nativeResizeCoalescingLocked(
 }
 
 fn drawableAdmissionReadyLocked(state: *const PresentationState) bool {
-    return !state.detached and state.drawables_outstanding < 2 and
+    return drawableSlotFreeLocked(state, transaction_slot_limit);
+}
+
+/// Whether a present may take a drawable slot: fewer than `limit` slots are
+/// taken, and a change of pixel format waits until no slot is taken.
+fn drawableSlotFreeLocked(state: *const PresentationState, limit: u8) bool {
+    return !state.detached and state.drawables_outstanding < limit and
         (state.active_pixel_format == state.pixel_format or state.drawables_outstanding == 0);
 }
+
+/// The most drawable slots that may be taken when a present inside a
+/// transaction (a live resize) takes one. It waits for the frame in any case.
+const transaction_slot_limit = 2;
+
+/// The most drawable slots that may be taken when an ordinary present takes
+/// one: the layer's three drawables (see `DrawableLease.configure`). A
+/// drawable takes about three refreshes from its present until it is on
+/// screen (25 ms at 120 Hz). So with fewer slots, the main thread cannot
+/// present a frame at each refresh: with one slot, a 120 Hz screen showed
+/// a new frame only at each third refresh (40 frames a second) while the
+/// terminal scrolled. With three, it showed a new frame at almost each
+/// refresh, and nextDrawable did not block the main thread for more than
+/// 1 ms. It blocked when a fourth drawable was asked for.
+const ordinary_slot_limit = 3;
 
 fn reserveNativeDisplayLocked(state: *PresentationState) bool {
     if (state.native_display_requested or
@@ -491,11 +512,11 @@ fn requestNativeRedrawState(state: *PresentationState) void {
 }
 
 /// Take a drawable slot and a drawable. `limit` is the most slots that may be
-/// taken already (see `holdUntilPresented`): 2 for a present inside a
-/// transaction (a live resize), which waits for the frame in any case, and 1
+/// taken already (see `holdUntilPresented`): `transaction_slot_limit` for a
+/// present inside a transaction (a live resize), and `ordinary_slot_limit`
 /// for an ordinary present, so that the main thread asks for a drawable only
-/// while no frame waits in the window server's queue. A frame that finds no
-/// slot waits in the mailbox, and a newer frame replaces it there.
+/// while one is free. A frame that finds no slot waits in the mailbox, and a
+/// newer frame replaces it there.
 fn acquireDrawableState(
     state: *PresentationState,
     width: usize,
@@ -506,7 +527,7 @@ fn acquireDrawableState(
 
     var update_format = false;
     state.mutex.lockUncancelable(global.io());
-    if (!drawableAdmissionReadyLocked(state) or state.drawables_outstanding >= limit) {
+    if (!drawableSlotFreeLocked(state, limit)) {
         state.mutex.unlock(global.io());
         return error.DrawableBusy;
     }
@@ -622,9 +643,9 @@ const CopyCompletion = struct {
     state: *PresentationState,
     surface: *IOSurface,
     texture: objc.Object,
-    /// Holds one of the two drawable slots. The slot is free again after the
-    /// GPU completes, the main thread presents or discards the drawable, and
-    /// the drawable is on screen or dropped.
+    /// Holds one of the drawable slots. The slot is free again after the GPU
+    /// completes, the main thread presents or discards the drawable, and the
+    /// drawable is on screen or dropped.
     settlement: objc.Object,
 
     fn arrive(self: *CopyCompletion, party: DrawableLease.CompletionGate.Party) void {
@@ -674,7 +695,7 @@ fn presentPending(
         state,
         pending.surface.getWidth(),
         pending.surface.getHeight(),
-        if (transactional) 2 else 1,
+        if (transactional) transaction_slot_limit else ordinary_slot_limit,
     ) catch |err| return if (err == error.DrawableBusy) .deferred else .rejected;
     defer drawable.release();
     if (drawableAcceptance(
