@@ -237,6 +237,45 @@ pub fn isCovering(cp: u21) bool {
     };
 }
 
+/// The alpha of a cell's background, from 0 (the terminal background shows
+/// through) to 255 (opaque).
+///
+/// A cell whose explicit background color is the default background (the
+/// color that OSC 11 reports) is the same as a cell with no background
+/// color. Programs often paint their empty cells with it. With a translucent
+/// terminal background, such a cell must not be an opaque block. The padding
+/// heuristics (row.neverExtendBg) use the same rule.
+pub fn bgAlpha(opts: struct {
+    /// The cell is selected or is a search match.
+    highlighted: bool,
+    /// The cell has the inverse style.
+    inverse: bool,
+    /// The background color of the cell's style, if it has one.
+    bg: ?terminal.color.RGB,
+    /// The terminal's default background color.
+    default_bg: terminal.color.RGB,
+    /// The `background-opacity-cells` and `background-opacity` config.
+    opacity_cells: bool = false,
+    opacity: f64 = 1,
+}) u8 {
+    const opaque_alpha: u8 = 255;
+
+    // Selected, highlighted and reversed cells are fully opaque.
+    if (opts.highlighted or opts.inverse) return opaque_alpha;
+
+    const own_bg = if (opts.bg) |c| !c.eql(opts.default_bg) else false;
+
+    // With background-opacity-cells, the opacity applies to all cells.
+    if (opts.opacity_cells and own_bg) {
+        const alpha: f64 = @as(f64, @floatFromInt(opaque_alpha)) * opts.opacity;
+        return @intFromFloat(alpha);
+    }
+
+    // A cell with a background color of its own is fully opaque. For all
+    // other cells, the background color that is drawn already shows.
+    return if (own_bg) opaque_alpha else 0;
+}
+
 /// Returns true of the codepoint is a "symbol-like" character, which
 /// for now we define as anything in a private use area, and anything
 /// in several unicode blocks:
@@ -713,5 +752,76 @@ test "Cell constraint widths" {
             0,
             state.cols,
         ));
+    }
+}
+
+test "bgAlpha: a background that is the default background is not opaque" {
+    const testing = std.testing;
+    const default_bg: terminal.color.RGB = .{ .r = 0x1e, .g = 0x1e, .b = 0x1e };
+    const red: terminal.color.RGB = .{ .r = 0xff, .g = 0, .b = 0 };
+
+    // No background color, and a background color that is the default.
+    try testing.expectEqual(0, bgAlpha(.{ .highlighted = false, .inverse = false, .bg = null, .default_bg = default_bg }));
+    try testing.expectEqual(0, bgAlpha(.{ .highlighted = false, .inverse = false, .bg = default_bg, .default_bg = default_bg }));
+
+    // A background color of its own stays opaque.
+    try testing.expectEqual(255, bgAlpha(.{ .highlighted = false, .inverse = false, .bg = red, .default_bg = default_bg }));
+
+    // Selected, highlighted and reversed cells stay opaque, also with the
+    // default background color.
+    try testing.expectEqual(255, bgAlpha(.{ .highlighted = true, .inverse = false, .bg = default_bg, .default_bg = default_bg }));
+    try testing.expectEqual(255, bgAlpha(.{ .highlighted = false, .inverse = true, .bg = null, .default_bg = default_bg }));
+
+    // background-opacity-cells applies to colors of their own only.
+    try testing.expectEqual(127, bgAlpha(.{ .highlighted = false, .inverse = false, .bg = red, .default_bg = default_bg, .opacity_cells = true, .opacity = 0.5 }));
+    try testing.expectEqual(0, bgAlpha(.{ .highlighted = false, .inverse = false, .bg = default_bg, .default_bg = default_bg, .opacity_cells = true, .opacity = 0.5 }));
+}
+
+test "bgAlpha: SGR background colors in a terminal" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var t: terminal.Terminal = try .init(testing.io, alloc, .{
+        .cols = 10,
+        .rows = 1,
+    });
+    defer t.deinit(alloc);
+
+    // The default background is the same as palette color 1 and as the
+    // first RGB color below. Palette color 0 is another color.
+    const default_bg: terminal.color.RGB = .{ .r = 0x1e, .g = 0x1e, .b = 0x1e };
+    t.colors.background = .init(default_bg);
+    t.colors.foreground = .init(.{ .r = 0xff, .g = 0xff, .b = 0xff });
+    t.colors.palette.current[0] = .{ .r = 0x1a, .g = 0x1a, .b = 0x1a };
+    t.colors.palette.current[1] = default_bg;
+
+    var s = t.vtStream();
+    defer s.deinit();
+
+    // Cells 0-9: no color, SGR 40, SGR 41, SGR 101, 48;5;0, 48;5;1,
+    // 48;2 (the default), 48;2 (black), SGR 7 and SGR 49.
+    s.nextSlice("a\x1b[40mb\x1b[41mc\x1b[101md\x1b[48;5;0me\x1b[48;5;1mf" ++
+        "\x1b[48;2;30;30;30mg\x1b[48;2;0;0;0mh\x1b[0;7mi\x1b[0;49mj");
+
+    var state: terminal.RenderState = .empty;
+    defer state.deinit(alloc);
+    try state.update(alloc, &t);
+
+    const row = state.row_data.get(0);
+    const raw = row.cells.items(.raw);
+    const styles = row.cells.items(.style);
+    const expected = [_]u8{ 0, 255, 0, 255, 255, 0, 0, 255, 255, 0 };
+    for (expected, 0..) |want, x| {
+        const style: terminal.Style = if (raw[x].hasStyling()) styles[x] else .{};
+        const got = bgAlpha(.{
+            .highlighted = false,
+            .inverse = style.flags.inverse,
+            .bg = style.bg(&raw[x], &state.colors.palette),
+            .default_bg = state.colors.background,
+        });
+        testing.expectEqual(want, got) catch |err| {
+            std.debug.print("cell {d}\n", .{x});
+            return err;
+        };
     }
 }

@@ -3833,31 +3833,16 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     // Determine our background alpha. If we have transparency configured
                     // then this is dynamic depending on some situations. This is all
                     // in an attempt to make transparency look the best for various
-                    // situations. See inline comments.
-                    const bg_alpha: u8 = bg_alpha: {
-                        const default: u8 = 255;
-
-                        // Cells that are selected should be fully opaque.
-                        if (selected != .false) break :bg_alpha default;
-
-                        // Cells that are reversed should be fully opaque.
-                        if (style.flags.inverse) break :bg_alpha default;
-
-                        // If the user requested to have opacity on all cells, apply it.
-                        if (self.config.background_opacity_cells and bg_style != null) {
-                            var opacity: f64 = @floatFromInt(default);
-                            opacity *= self.config.background_opacity;
-                            break :bg_alpha @intFromFloat(opacity);
-                        }
-
-                        // Cells that have an explicit bg color should be fully opaque.
-                        if (bg_style != null) break :bg_alpha default;
-
-                        // Otherwise, we won't draw the bg for this cell,
-                        // we'll let the already-drawn background color
-                        // show through.
-                        break :bg_alpha 0;
-                    };
+                    // situations. See cellpkg.bgAlpha: for example, a cell whose
+                    // explicit bg color is the default background is not opaque.
+                    const bg_alpha = cellpkg.bgAlpha(.{
+                        .highlighted = selected != .false,
+                        .inverse = style.flags.inverse,
+                        .bg = bg_style,
+                        .default_bg = state.colors.background,
+                        .opacity_cells = self.config.background_opacity_cells,
+                        .opacity = self.config.background_opacity,
+                    });
 
                     self.cells.bgCell(y, x).* = .{
                         rgb.r, rgb.g, rgb.b, bg_alpha,

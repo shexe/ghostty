@@ -1020,6 +1020,10 @@ palette: Palette = .{},
 /// such as a Neovim and Tmux may not respect the `background-opacity`
 /// (by design).
 ///
+/// A cell whose explicit background color is the same as the terminal's
+/// background color (the color that OSC 11 reports) is not opaque. It
+/// shows as a cell with no background color, with or without this setting.
+///
 /// Setting this to `true` will apply the `background-opacity` to all cells
 /// regardless of whether they have an explicit background color set or not.
 ///
