@@ -2557,7 +2557,7 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
                     (clip_contains_grid and self.uniforms.grid_offset_y == 0 and
                         @as(u8, @bitCast(self.uniforms.grid_extra_rows)) == 0);
                 if (self.prepared_screen_alt and safe_captured_edge and
-                    self.config.padding_color == .@"extend-always" and
+                    self.config.padding_color != .background and
                     grid_rect.isFittedWithin(
                         frame.target.width,
                         frame.target.height,
@@ -3562,12 +3562,17 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             //
             // This helps make some scenarios look better while
             // avoiding scenarios we know do NOT look good.
+            //
+            // The alternate screen always extends, as the config docs
+            // say. A full-screen program fills all of the grid, and on the
+            // full-bleed alternate screen the padding is only the part of
+            // a cell that is left over.
             switch (self.config.padding_color) {
                 // These already have the correct values set above.
                 .background, .@"extend-always" => {},
 
                 // Apply heuristics for padding extension.
-                .extend => if (y == 0) {
+                .extend => if (state.screen == .alternate) {} else if (y == 0) {
                     self.uniforms.padding_extend.up = !rowNeverExtendBg(
                         row,
                         cells_raw,
