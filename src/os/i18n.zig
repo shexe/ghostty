@@ -183,6 +183,8 @@ extern fn _libintl_locale_name_canonicalize(name: [*:0]u8) void;
 
 test "canonicalizeLocale darwin" {
     if (!builtin.target.os.tag.isDarwin()) return error.SkipZigTest;
+    // Without i18n there is no libintl, and the locale stays as it is.
+    if (comptime !build_config.i18n) return error.SkipZigTest;
 
     const testing = std.testing;
     var buf: [256]u8 = undefined;
